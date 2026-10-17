@@ -74,6 +74,7 @@ enum RunSequenceCommand {
           renderer = NeuralRenderingTemporalReferenceBackend(
             backend: headRenderer,
             depthInverted: parsed.depthInverted,
+            blendScale: headRenderer.blendScale ?? 0.739_746_093_75,
             controlMaskIntensity: parsed.controlMaskIntensity,
             temporalPreprocessor: temporalPreprocessor,
             geometry: parsed.networkGeometry

@@ -1,16 +1,21 @@
-"""Extract the frame generation weights from the user's own ``libnvidia-ngx-dlssg.so``.
+"""Extract the frame generation weights from the user's own DLSS-G library.
 
-The 42 fp16 weight blobs live uncompressed in the library's data section in the
-GPU kernels' packed layouts:
+Two builds families are supported: ``libnvidia-ngx-dlssg.so.310.7.0`` (DLSS SDK
+310.7.0, Linux) and the Windows ``nvngx_dlssg.dll`` of 310.8.0 and 310.9.16
+(Streamline SDK 2.14.16). The 42 fp16 weight blobs live uncompressed in the
+library's read-only data in the GPU kernels' packed layouts:
 
 * ``custom_*`` convolutions (block0/block1): ``[co/8][tap][ci/8][co%8][ci%8]``;
 * ``block1.stem0``: plain ``[co][tap][ci]`` (Cin = 18);
 * U-Net ``k_conv_fp16_nhwc``: ``mma.m16n8k16`` A-fragments, bias in the tail.
 
 They are re-laid out as dense ``[Cout, Cin, kh, kw]`` tensors with the names
-``mlxdlss.framegen`` expects.  Offsets are for ``libnvidia-ngx-dlssg.so.310.7.0``
-(DLSS SDK 310.7.0, sha256 recorded in the output metadata); other builds need a
-new offset table.
+``mlxdlss.framegen`` expects. The ``.so`` uses absolute offsets. The Windows
+builds keep one contiguous weight image whose position moves between builds
+(310.8.0 -> 310.9.16: +9328 bytes) while its contents stay byte-identical to the
+310.7.0 tensors; the extractor finds it by the SHA-256 of its first 256 bytes and
+reads relative offsets. Other builds need a new table. The source digest is
+recorded in the output metadata.
 """
 from __future__ import annotations
 
@@ -68,7 +73,81 @@ SPEC_310_7_0: dict[str, tuple[str, int, int, int, int, int | None]] = {
     "unet.conv15": ("unet", 32, 32, 1, 2626496, None),
     "unet.conv16": ("unet", 16, 32, 1, 2541664, None),
 }
-KNOWN_SHA256 = {"libnvidia-ngx-dlssg.so.310.7.0": None}  # filled in by the caller's digest
+# name -> (kind, Cout, Cin, k, weight_offset, bias_offset), relative to the weight
+# image of nvngx_dlssg.dll 310.8.0 / 310.9.16 (verified bit-exact on both against
+# the 310.7.0 tensors).
+SPEC_WINDOWS_RELATIVE: dict[str, tuple[str, int, int, int, int, int | None]] = {
+    "block0.stem0": ("custom", 32, 16, 3, 127664, 171632),
+    "block0.stem1": ("custom", 32, 32, 3, 0, 171696),
+    "block0.stem2": ("custom", 64, 32, 3, 247792, 284656),
+    "block0.res0": ("custom", 64, 64, 3, 294416, 368144),
+    "block0.res1": ("custom", 64, 64, 3, 442000, 515792),
+    "block0.res2": ("custom", 64, 64, 3, 21680, 515920),
+    "block0.res3": ("custom", 64, 64, 3, 174064, 543696),
+    "block0.res4": ("custom", 64, 64, 3, 543824, 617552),
+    "block0.res5": ("custom", 64, 64, 3, 636112, 709840),
+    "block0.res6": ("custom", 64, 64, 3, 368272, 728400),
+    "block0.res7": ("custom", 64, 64, 3, 728528, 820688),
+    "block0.bot0": ("custom3", 32, 64, 3, 866736, 977328),
+    "block0.bot1": ("custom", 8, 32, 3, 1010720, 1015424),
+    "block1.stem0": ("plain", 16, 18, 3, 1025904, 1031088),
+    "block1.stem1": ("custom", 32, 16, 3, 1063136, 1072352),
+    "block1.res0": ("custom", 32, 32, 3, 136880, 1079808),
+    "block1.res1": ("custom", 32, 32, 3, 848304, 515728),
+    "block1.res2": ("custom", 32, 32, 3, 1079872, 1098368),
+    "block1.res3": ("custom", 32, 32, 3, 1044704, 820816),
+    "block1.res4": ("custom", 32, 32, 3, 709968, 1098432),
+    "block1.res5": ("custom", 32, 32, 3, 617680, 1098304),
+    "block1.res6": ("custom", 32, 32, 3, 829872, 1079744),
+    "block1.res7": ("custom", 32, 32, 3, 802256, 1038832),
+    "block1.bot0": ("custom3", 16, 32, 3, 516048, 1015328),
+    "block1.bot1": ("custom", 8, 16, 3, 171760, 1098496),
+    "unet.conv0": ("unet", 32, 48, 3, 1314064, None),
+    "unet.conv1": ("unet", 64, 32, 1, 1437648, None),
+    "unet.conv2": ("unet", 128, 64, 3, 1447888, None),
+    "unet.conv3": ("unet", 128, 128, 3, 2024256, None),
+    "unet.conv4": ("unet", 256, 128, 3, 3197168, None),
+    "unet.conv5": ("unet", 512, 256, 1, 4474704, None),
+    "unet.conv6": ("unet", 256, 512, 1, 2629344, None),
+    "unet.conv7": ("unet", 256, 256, 1, 1753920, None),
+    "unet.conv8": ("unet", 128, 256, 1, 5087056, None),
+    "unet.conv9": ("unet", 128, 128, 1, 5278336, None),
+    "unet.conv10": ("unet", 128, 128, 1, 4405072, None),
+    "unet.conv11": ("unet", 128, 128, 1, 5402064, None),
+    "unet.conv12": ("unet", 64, 128, 1, 5471696, None),
+    "unet.conv13": ("unet", 64, 64, 1, 5535872, None),
+    "unet.conv14": ("unet", 32, 64, 1, 5563616, None),
+    "unet.conv15": ("unet", 32, 32, 1, 5513536, None),
+    "unet.conv16": ("unet", 16, 32, 1, 5600896, None),
+}
+# SHA-256 of the first 256 bytes of that image (block0.stem1's packed weights).
+WINDOWS_IMAGE_SHA256 = "4ee053756689bbcf925e7bbc36fe40e7c572b5e2188bba7951e6d57e44b500d6"
+WINDOWS_IMAGE_ALIGNMENT = 16
+
+
+def locate_windows_image(blob: bytes) -> int | None:
+    """Offset of the weight image in a Windows build, or ``None``."""
+    view = memoryview(blob)
+    for offset in range(0, len(blob) - 256 + 1, WINDOWS_IMAGE_ALIGNMENT):
+        if hashlib.sha256(view[offset : offset + 256]).hexdigest() == WINDOWS_IMAGE_SHA256:
+            return offset
+    return None
+
+
+def spec_for(blob: bytes) -> tuple[dict[str, tuple[str, int, int, int, int, int | None]], str]:
+    """The offset table for ``blob`` and a short description of the build family."""
+    if blob[:4] == b"\x7fELF":
+        return SPEC_310_7_0, "libnvidia-ngx-dlssg.so 310.7.0 table"
+    if blob[:2] == b"MZ":
+        base = locate_windows_image(blob)
+        if base is None:
+            raise ValueError("no known frame generation weight image in this nvngx_dlssg.dll (supported: 310.8.0, 310.9.16)")
+        spec = {
+            name: (kind, cout, cin, k, base + woff, None if boff is None else base + boff)
+            for name, (kind, cout, cin, k, woff, boff) in SPEC_WINDOWS_RELATIVE.items()
+        }
+        return spec, f"nvngx_dlssg.dll weight image at {base}"
+    raise ValueError("not an ELF or PE library")
 
 
 def _halfs(blob: bytes, offset: int, count: int) -> np.ndarray:
@@ -99,8 +178,8 @@ def unet_dense(halfs: np.ndarray, cout: int, cin: int, k: int) -> tuple[np.ndarr
 
 
 def extract(library: pathlib.Path, spec: dict | None = None) -> tuple[dict[str, np.ndarray], str]:
-    spec = spec or SPEC_310_7_0
     blob = library.read_bytes()
+    spec = spec or spec_for(blob)[0]
     digest = hashlib.sha256(blob).hexdigest()
     out: dict[str, np.ndarray] = {}
     for name, (kind, cout, cin, k, woff, boff) in spec.items():
@@ -128,7 +207,9 @@ def extract(library: pathlib.Path, spec: dict | None = None) -> tuple[dict[str, 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("library", type=pathlib.Path, help="libnvidia-ngx-dlssg.so.310.7.0 from the DLSS SDK or a driver install")
+    parser.add_argument(
+        "library", type=pathlib.Path,
+        help="libnvidia-ngx-dlssg.so.310.7.0 (DLSS SDK) or nvngx_dlssg.dll 310.8.0 / 310.9.16 (Streamline SDK)")
     parser.add_argument("destination", type=pathlib.Path, help="output .safetensors")
     args = parser.parse_args(argv)
     from safetensors.numpy import save_file

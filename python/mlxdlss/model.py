@@ -13,34 +13,16 @@ import torch
 from torch import nn
 from torch.nn import functional
 
+from . import topology as _topology
+
 COSINE_NORM_FLOOR = 0.00006198883056640625
 
 
-def recovered_window_origin(block_index: int) -> tuple[int, int]:
+def recovered_window_origin(
+    block_index: int, topology: _topology.Topology = _topology.HT
+) -> tuple[int, int]:
     """Return the vendor window origin as ``(y, x)`` for one graph block."""
-    if block_index == 0:
-        phase = 0
-    elif 1 <= block_index <= 4:
-        phase = block_index - 1
-    elif 5 <= block_index <= 8:
-        phase = block_index - 5
-    elif 9 <= block_index <= 14:
-        phase = block_index - 9
-    elif 15 <= block_index <= 22:
-        phase = block_index - 15
-    elif 23 <= block_index <= 30:
-        phase = block_index - 23
-    elif 40 <= block_index <= 55:
-        phase = block_index - (40 if block_index < 48 else 48)
-    elif 56 <= block_index <= 61:
-        phase = block_index - 54
-    elif 62 <= block_index <= 69:
-        phase = block_index - (62 if block_index < 66 else 66)
-    elif block_index == 70:
-        phase = 1
-    else:
-        return (0, 0)
-    return ((0, -4, 0, -4)[phase % 4], (0, -4, -4, 0)[phase % 4])
+    return topology.window_origin(block_index)
 
 
 # Token-local work (feed-forward branches, residuals) and window attention are
@@ -842,10 +824,17 @@ def nearest_upsample2_crop(
 
 
 class NeuralRenderingModel(nn.Module):
-    """Fixed recovered 71-block graph with external logical weights."""
+    """Recovered U-Net graph (71-block HT or 31-block small preset) with external logical weights."""
 
-    def __init__(self, weights: dict[str, torch.Tensor]):
+    def __init__(
+        self,
+        weights: dict[str, torch.Tensor],
+        topology: _topology.Topology | None = None,
+    ):
         super().__init__()
+        self.topology = topology or _topology.infer_logical(
+            {name: tuple(value.shape) for name, value in weights.items()}
+        )
         self._weight_attributes: dict[str, str] = {}
         for index, (name, value) in enumerate(sorted(weights.items())):
             attribute = f"weight_{index}"
@@ -867,6 +856,7 @@ class NeuralRenderingModel(nn.Module):
         publish: bool = True,
     ) -> torch.Tensor:
         prefix = f"block{index}.layer0"
+        origin = self.topology.window_origin(index)
         attention_bias = self.weight(f"{prefix}.attn_bias")
         if uses_fragment_swizzle(index, head_count):
             attention_bias = recover_attention_bias_layout(attention_bias)
@@ -888,7 +878,7 @@ class NeuralRenderingModel(nn.Module):
                 attention_cosine=self.weight(f"{prefix}.attn_cos_skip"),
                 head_count=head_count,
                 window_size=8,
-                window_origin=recovered_window_origin(index),
+                window_origin=origin,
             )
         else:
             output = window_block(
@@ -903,11 +893,12 @@ class NeuralRenderingModel(nn.Module):
                 attention_cosine=self.weight(f"{prefix}.attn_cos_skip"),
                 head_count=head_count,
                 window_size=8,
-                window_origin=recovered_window_origin(index),
+                window_origin=origin,
             )
-        # Block 0 is pooled before its publication and block 70 feeds the head;
-        # ``publish=False`` hands the half-precision output to a fused transition.
-        return output if index in (0, 70) or not publish else e4m3_round_trip(output)
+        # The pre block is pooled before its publication and the post block
+        # feeds the head; ``publish=False`` hands the half-precision output to
+        # a fused transition.
+        return output if index in (0, self.topology.post) or not publish else e4m3_round_trip(output)
 
     def _split_window(self, value: torch.Tensor, index: int) -> torch.Tensor:
         prefix = f"block{index}"
@@ -930,7 +921,7 @@ class NeuralRenderingModel(nn.Module):
                 attention_cosine=self.weight(f"{prefix}.layer3.attn_cos_skip"),
                 head_count=16,
                 window_size=8,
-                window_origin=recovered_window_origin(index),
+                window_origin=self.topology.window_origin(index),
             )
         )
 
@@ -971,7 +962,7 @@ class NeuralRenderingModel(nn.Module):
         transformed = self._window(
             value, index, head_count=head_count, publish=False
         )
-        if index == 22:
+        if index == self.topology.last_encoder_downsample:
             transformed = pad_spatial_end(transformed, 8)
         # The pooled tensor is published as E4M3 before the QMMA projection
         # (vendor transition captures: 0.010-0.021 versus 0.025-0.028 without).
@@ -1003,6 +994,7 @@ class NeuralRenderingModel(nn.Module):
         )
 
     def forward(self, input_value: torch.Tensor) -> torch.Tensor:
+        topology = self.topology
         adapter = self.weight("block0.layer0.input_adapter_weight")
         value = _per_token(lambda tokens: tokens @ adapter, input_value)
         # The fused pre kernel runs the block-0 window attention on the full
@@ -1018,62 +1010,43 @@ class NeuralRenderingModel(nn.Module):
         full_resolution_skip = e4m3_round_trip(block0_output)
         value = e4m3_round_trip(average_pool2(block0_output))
         del block0_output
-        for index in range(1, 4):
-            value = self._window(value, index, head_count=1)
-        skips = [value]
-        value = self._downsample_window(value, 4, head_count=1)
 
-        for regular, transition, head_count in (
-            (range(5, 8), 8, 2),
-            (range(9, 14), 14, 4),
-            (range(15, 22), 22, 8),
-        ):
-            for index in regular:
+        skips = []
+        for stage, channels in enumerate(_topology.ENCODER_CHANNELS):
+            head_count = _topology.HEADS[channels]
+            blocks = topology.encoder_stage(stage)
+            for index in blocks[:-1]:
                 value = self._window(value, index, head_count=head_count)
             skips.append(value)
-            value = self._downsample_window(
-                value,
-                transition,
-                head_count=head_count,
-            )
+            value = self._downsample_window(value, blocks[-1], head_count=head_count)
 
-        for index in range(23, 30):
+        for index in topology.split_encoder:
             value = self._split_window(value, index)
-        value = self._split_window(value, 30)
         split_skip = value
         value = pad_spatial_end(value, 8)
         value = downsample(
             value,
-            weight=self.weight("block30.layer4.weight"),
+            weight=self.weight(f"block{topology.split_encoder[-1]}.layer4.weight"),
         )
         value = e4m3_round_trip(value)
-        for index in range(31, 39):
+        for index in topology.global_stage:
             value = self._global(value, index)
 
+        bridge = f"block{topology.bridge}.layer0"
         value = decoder_input_merge(
-            value @ self.weight("block39.layer0.conv_weight"),
+            value @ self.weight(f"{bridge}.conv_weight"),
             skip=split_skip,
-            skip_sine=self.weight("block39.layer0.inp_upsample_sin"),
+            skip_sine=self.weight(f"{bridge}.inp_upsample_sin"),
         )
         value = e4m3_round_trip(value)
-        for index in range(40, 48):
+        for index in topology.split_decoder:
             value = self._split_window(value, index)
-        value = self._upsample_window(value, skips[3], 48, head_count=8)
-        for index in range(49, 56):
-            value = self._window(value, index, head_count=8)
 
-        for transition, regular, skip_index, head_count in (
-            (56, range(57, 62), 2, 4),
-            (62, range(63, 66), 1, 2),
-            (66, range(67, 70), 0, 1),
-        ):
-            value = self._upsample_window(
-                value,
-                skips[skip_index],
-                transition,
-                head_count=head_count,
-            )
-            for index in regular:
+        for stage in reversed(range(len(_topology.ENCODER_CHANNELS))):
+            head_count = _topology.HEADS[_topology.ENCODER_CHANNELS[stage]]
+            blocks = topology.decoder_stage(stage)
+            value = self._upsample_window(value, skips[stage], blocks[0], head_count=head_count)
+            for index in blocks[1:]:
                 value = self._window(value, index, head_count=head_count)
 
         value = nearest_upsample2_crop(
@@ -1081,14 +1054,21 @@ class NeuralRenderingModel(nn.Module):
             height=full_resolution_skip.shape[1],
             width=full_resolution_skip.shape[2],
         )
-        merge_sin = self.weight("block70.layer0.inp_merge_sin")
-        merge_cos = self.weight("block70.layer0.inp_merge_cos")
+        post = f"block{topology.post}.layer0"
+        merge_sin = self.weight(f"{post}.inp_merge_sin")
+        merge_cos = self.weight(f"{post}.inp_merge_cos")
         value = _rows(lambda up, skip: up * merge_sin + skip * merge_cos, value, full_resolution_skip)
         del full_resolution_skip
-        value = self._window(value, 70, head_count=1)
-        out_gain = self.weight("block70.layer0.out_gain")
-        out_conv = self.weight("block70.layer0.out_conv_weight")
+        value = self._window(value, topology.post, head_count=1)
+        out_gain = self.weight(f"{post}.out_gain")
+        out_conv = self.weight(f"{post}.out_conv_weight")
         return _per_token(lambda tokens: tokens[..., :16] @ out_gain + tokens[..., 16:] @ out_conv, value)
+
+    @property
+    def blend_scale(self) -> float | None:
+        """The network's temporal blend cap (``blockN.layer0.blend_scale`` of the post block), if packaged."""
+        name = f"block{self.topology.post}.layer0.blend_scale"
+        return float(self.weight(name).reshape(-1)[0]) if name in self._weight_attributes else None
 
 
 def load_model(path: str | os.PathLike[str]) -> NeuralRenderingModel:

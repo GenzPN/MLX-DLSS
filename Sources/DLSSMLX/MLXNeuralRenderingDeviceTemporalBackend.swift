@@ -22,11 +22,17 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
   private let baseFeatureProcessor = MLXFirstFrameFeatureProcessor()
   /// `MLXDLSS_NR_DEVICE_FEATURES=0` builds the base features with the CPU preprocessor and uploads them (diagnostics).
   nonisolated(unsafe) static var deviceFeaturesEnabled: Bool = ProcessInfo.processInfo.environment["MLXDLSS_NR_DEVICE_FEATURES"] != "0"
+  /// Padded network extents (1080p and every other extent that is not a
+  /// multiple of 64) build the features on the network extent in one kernel.
+  /// `MLXDLSS_NR_EXTENDED_FEATURES=0` restores the logical features gathered
+  /// onto the extent (diagnostics; same values).
+  nonisolated(unsafe) static var extendedFeaturesEnabled: Bool =
+    ProcessInfo.processInfo.environment["MLXDLSS_NR_EXTENDED_FEATURES"] != "0"
   private let postprocessor: MLXTemporalPostprocessor
   private var tracker = TemporalLifecycleTracker()
   private var history: MLXArray?
   private var noiseFrameIndex: UInt32 = 0
-  private var extensionIndices: (geometry: NeuralRenderingNetworkGeometry, rows: MLXArray, columns: MLXArray)?
+  private var extensionIndices: (geometry: NeuralRenderingNetworkGeometry, indices: NeuralRenderingExtensionIndices)?
   private let videoOutput: MLXVideoOutput?
   private var nativeComposition: MLXVideoComposition?
   private var nativeCompositionOptions: MLXVideoOutputOptions?
@@ -66,7 +72,7 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
     historyTransform: NeuralRenderingTextureTransform? = nil,
     motionTransform: NeuralRenderingTextureTransform? = nil,
     controlMaskIntensity: Float = 1,
-    blendScale: Float = 0.739_746_093_75,
+    blendScale: Float? = nil,
     featureControls: NeuralRenderingFeatureControls = .init(),
     geometry: NeuralRenderingNetworkGeometryPolicy = .vendorAligned,
     videoOutput: MLXVideoOutputOptions? = nil,
@@ -79,11 +85,12 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
     guard MLXNeuralRenderer.transformerArchitectures.contains(package.manifest.architecture) else {
       throw MLXBackendError.unsupportedArchitecture(package.manifest.architecture)
     }
-    self.head = try MLXNeuralRenderer(
+    let head = try MLXNeuralRenderer(
       packageURL: packageURL,
       executionMode: executionMode,
       computePrecision: computePrecision
     )
+    self.head = head
     self.computePrecision = computePrecision
     self.depthInverted = depthInverted
     self.historyTransform = historyTransform
@@ -91,7 +98,9 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
     self.controlMaskIntensity = controlMaskIntensity
     self.featureControls = featureControls
     self.geometryPolicy = geometry
-    self.postprocessor = MLXTemporalPostprocessor(blendScale: blendScale)
+    // The package's own blend cap unless the caller overrides it.
+    self.postprocessor = MLXTemporalPostprocessor(
+      blendScale: blendScale ?? head.blendScale ?? MLXTemporalPostprocessor.defaultBlendScale)
     self.videoOutput = try videoOutput.map { try MLXVideoOutput(options: $0, frameGeneration: frameGeneration) }
   }
 
@@ -289,7 +298,37 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
       )
       let features: MLXArray
       let networkFeatures: MLXArray
-      if Self.deviceFeaturesEnabled, let history, geometry.isIdentity {
+      if Self.deviceFeaturesEnabled, Self.extendedFeaturesEnabled, !geometry.isIdentity {
+        // The features of the whole network extent in one kernel; the logical
+        // features are its top-left corner (the postprocessor reads them there).
+        let indices = extensionIndices(for: geometry)
+        if let history {
+          features = temporalProcessor(
+            color: colorArray,
+            controlMask: controlMaskArray,
+            noiseFrameIndex: noiseFrameIndex,
+            history: history,
+            historyTransform: historyTransform,
+            motion: motionArray,
+            motionTransform: motionTransform,
+            depth: depthArray,
+            depthInverted: depthInverted,
+            depthGuideMode: .observedZeroDescriptor,
+            historyConfidence: confidenceArray,
+            featureControls: featureControls,
+            extension: indices
+          )
+        } else {
+          features = baseFeatureProcessor(
+            color: colorArray,
+            controlMask: controlMaskArray,
+            noiseFrameIndex: noiseFrameIndex,
+            featureControls: featureControls,
+            extension: indices
+          )
+        }
+        networkFeatures = features
+      } else if Self.deviceFeaturesEnabled, let history, geometry.isIdentity {
         // Base features and the reprojected history in one kernel; nothing but the
         // colour, motion and depth crosses the host boundary.
         features = temporalProcessor(
@@ -366,11 +405,8 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
       let preparedFeatures = MLXArrayTransfer(
         array: networkFeatures.asType(computePrecision.mlxDataType)
       )
-      let networkHeadOutput = try await head.statelessOutputTransfer(preparedFeatures).array
-      let headOutput =
-        geometry.isIdentity
-        ? networkHeadOutput
-        : networkHeadOutput[0..., 0..<logicalHeight, 0..<logicalWidth, 0...]
+      // The postprocessor reads the logical corner of the network-extent head output.
+      let headOutput = try await head.statelessOutputTransfer(preparedFeatures).array
       let hadHistory = history != nil
       let output = postprocessor(
         head: headOutput,
@@ -522,24 +558,13 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
     return array.take(indices.rows, axis: 1).take(indices.columns, axis: 2)
   }
 
-  private func extensionIndices(
-    for geometry: NeuralRenderingNetworkGeometry
-  ) -> (rows: MLXArray, columns: MLXArray) {
+  private func extensionIndices(for geometry: NeuralRenderingNetworkGeometry) -> NeuralRenderingExtensionIndices {
     if let cached = extensionIndices, cached.geometry == geometry {
-      return (cached.rows, cached.columns)
+      return cached.indices
     }
-    let rows = MLXArray(
-      (0..<geometry.networkHeight).map { y in
-        Int32(geometry.sourceCoordinate(x: 0, y: y).y)
-      }
-    )
-    let columns = MLXArray(
-      (0..<geometry.networkWidth).map { x in
-        Int32(geometry.sourceCoordinate(x: x, y: 0).x)
-      }
-    )
-    extensionIndices = (geometry, rows, columns)
-    return (rows, columns)
+    let indices = NeuralRenderingExtensionIndices(geometry)
+    extensionIndices = (geometry, indices)
+    return indices
   }
 
   private func nanoseconds(in duration: Duration) -> UInt64 {
@@ -547,6 +572,21 @@ public actor MLXNeuralRenderingDeviceTemporalBackend: NeuralRenderBackend {
     return UInt64(max(0, components.seconds)) * 1_000_000_000
       + UInt64(max(0, components.attoseconds) / 1_000_000_000)
   }
+}
+
+/// The reflected-then-clamped source row of every network row and source column
+/// of every network column (`NeuralRenderingNetworkGeometry.sourceCoordinate`).
+struct NeuralRenderingExtensionIndices {
+  let rows: MLXArray
+  let columns: MLXArray
+
+  init(_ geometry: NeuralRenderingNetworkGeometry) {
+    rows = MLXArray((0..<geometry.networkHeight).map { Int32(geometry.sourceCoordinate(x: 0, y: $0).y) })
+    columns = MLXArray((0..<geometry.networkWidth).map { Int32(geometry.sourceCoordinate(x: $0, y: 0).x) })
+  }
+
+  /// Placeholder kernel input of the unpadded kernels.
+  nonisolated(unsafe) static let none = MLXArray([Int32(0)])
 }
 
 public enum MLXTemporalConfidenceError: Error, Equatable, Sendable {
@@ -575,9 +615,13 @@ final class MLXTemporalPostprocessor: @unchecked Sendable {
       if (pixel >= pixelCount) {
         return;
       }
+      // The head output and the features may cover the padded network extent.
+      uint width = uint(currentColor_shape[2]);
+      uint row = pixel / width;
+      uint column = pixel - row * width;
       uint colorOffset = pixel * 3;
-      uint headOffset = pixel * 4;
-      uint featureOffset = pixel * 16;
+      uint headOffset = (row * uint(head_shape[2]) + column) * 4;
+      uint featureOffset = (row * uint(features_shape[2]) + column) * 16;
       float alpha = 0.0f;
       if (hasHistory) {
         ushort logitIndex = as_type<ushort>(half(head[headOffset + 3]));
@@ -618,7 +662,10 @@ final class MLXTemporalPostprocessor: @unchecked Sendable {
       """#
   )
 
-  init(blendScale: Float = 0.739_746_093_75) {
+  /// `half(blend_scale)` of the 71-block network, for packages that carry none.
+  static let defaultBlendScale: Float = 0.739_746_093_75
+
+  init(blendScale: Float = defaultBlendScale) {
     let recoveredBlendScale = Float(Float16(blendScale))
     let values = (UInt32.zero...UInt32(UInt16.max)).map { bits in
       let logit = Float(Float16(bitPattern: UInt16(bits)))
@@ -681,31 +728,37 @@ private func featureControlArray(
 final class MLXFirstFrameFeatureProcessor: @unchecked Sendable {
   private let kernel = MLXFast.metalKernel(
     name: "mlxdlss_first_frame_features",
-    inputNames: ["color", "controlMask", "frameIndex", "featureControls"],
+    inputNames: ["color", "controlMask", "frameIndex", "featureControls", "rows", "columns"],
     outputNames: ["output"],
     source: source,
     header: header
   )
 
+  /// - Parameter extension: the source row and column of every network pixel
+  ///   (reflect-then-clamp); the features then cover the network extent, with
+  ///   each padded pixel's noise from its own position.
   func callAsFunction(
     color: MLXArray,
     controlMask: MLXArray? = nil,
     noiseFrameIndex: UInt32,
-    featureControls: NeuralRenderingFeatureControls = .init()
+    featureControls: NeuralRenderingFeatureControls = .init(),
+    extension indices: NeuralRenderingExtensionIndices? = nil
   ) -> MLXArray {
-    let height = color.shape[1]
-    let width = color.shape[2]
+    let height = indices?.rows.size ?? color.shape[1]
+    let width = indices?.columns.size ?? color.shape[2]
     return kernel(
       [
         color,
         controlMask ?? color,
         MLXArray(noiseFrameIndex),
         featureControlArray(featureControls),
+        indices?.rows ?? NeuralRenderingExtensionIndices.none,
+        indices?.columns ?? NeuralRenderingExtensionIndices.none,
       ],
       template: featureTemplate(
         featureControls,
         hasControlMask: controlMask != nil
-      ),
+      ) + [("extended", indices != nil)],
       grid: (width, height, 1),
       threadGroup: (8, 8, 1),
       outputShapes: [[1, height, width, 16]],
@@ -809,15 +862,19 @@ final class MLXFirstFrameFeatureProcessor: @unchecked Sendable {
       return mlxdlssHalf(centered * 0.125f);
     }
 
+    // The features of network pixel (x, y) at `featureOffset`: the noise is a
+    // function of (x, y), the colour and control-mask channels read `colorOffset`
+    // (the pixel itself, or its reflected-then-clamped source on a padded extent).
     template <typename ColorPointer, typename ControlMaskPointer>
-    METAL_FUNC void mlxdlssWriteFirstFrameFeatures(
+    METAL_FUNC void mlxdlssWriteFirstFrameFeaturesAt(
       device float* output,
+      uint featureOffset,
       ColorPointer color,
       ControlMaskPointer controlMask,
+      uint colorOffset,
       uint frameIndex,
       uint x,
       uint y,
-      uint width,
       float normalizedStyle,
       float localToneStrength,
       float localStructureStrength,
@@ -826,9 +883,6 @@ final class MLXFirstFrameFeatureProcessor: @unchecked Sendable {
       bool hasAutomaticMask,
       bool hasControlMask
     ) {
-      uint pixel = y * width + x;
-      uint colorOffset = pixel * 3;
-      uint featureOffset = pixel * 16;
       uint seed = y * 0xd8163841u;
       seed ^= x * 0x8da6b343u;
       seed ^= frameIndex * 0x9e3779b9u;
@@ -912,24 +966,52 @@ final class MLXFirstFrameFeatureProcessor: @unchecked Sendable {
       output[featureOffset + 14] = automaticMaskStructure;
       output[featureOffset + 15] = 0.0f;
     }
+
+    template <typename ColorPointer, typename ControlMaskPointer>
+    METAL_FUNC void mlxdlssWriteFirstFrameFeatures(
+      device float* output,
+      ColorPointer color,
+      ControlMaskPointer controlMask,
+      uint frameIndex,
+      uint x,
+      uint y,
+      uint width,
+      float normalizedStyle,
+      float localToneStrength,
+      float localStructureStrength,
+      float skinStructureStrength,
+      float automaticMaskStructureStrength,
+      bool hasAutomaticMask,
+      bool hasControlMask
+    ) {
+      uint pixel = y * width + x;
+      mlxdlssWriteFirstFrameFeaturesAt(
+        output, pixel * 16, color, controlMask, pixel * 3, frameIndex, x, y,
+        normalizedStyle, localToneStrength, localStructureStrength,
+        skinStructureStrength, automaticMaskStructureStrength,
+        hasAutomaticMask, hasControlMask);
+    }
     """#
 
   private static let source = #"""
     uint x = thread_position_in_grid.x;
     uint y = thread_position_in_grid.y;
-    uint height = uint(color_shape[1]);
-    uint width = uint(color_shape[2]);
+    uint logicalWidth = uint(color_shape[2]);
+    uint height = extended ? uint(rows_shape[0]) : uint(color_shape[1]);
+    uint width = extended ? uint(columns_shape[0]) : logicalWidth;
     if (x >= width || y >= height) {
       return;
     }
-    mlxdlssWriteFirstFrameFeatures(
+    uint colorPixel = extended ? uint(rows[y]) * logicalWidth + uint(columns[x]) : y * width + x;
+    mlxdlssWriteFirstFrameFeaturesAt(
       output,
+      (y * width + x) * 16,
       color,
       controlMask,
+      colorPixel * 3,
       frameIndex,
       x,
       y,
-      width,
       featureControls[0],
       featureControls[1],
       featureControls[2],
@@ -947,6 +1029,7 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
     inputNames: [
       "baseFeatures", "color", "controlMask", "frameIndex",
       "featureControls", "history", "motion", "depth", "historyConfidence",
+      "rows", "columns",
     ],
     outputNames: ["output"],
     source: source,
@@ -983,6 +1066,10 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
     )
   }
 
+  /// - Parameter extension: the source row and column of every network pixel
+  ///   (reflect-then-clamp). The features then cover the network extent: a
+  ///   padded pixel takes every channel of its source pixel except the noise,
+  ///   which comes from its own position.
   func callAsFunction(
     color: MLXArray,
     controlMask: MLXArray? = nil,
@@ -995,7 +1082,8 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
     depthInverted: Bool,
     depthGuideMode: NeuralRenderingDepthGuideMode = .observedZeroDescriptor,
     historyConfidence: MLXArray? = nil,
-    featureControls: NeuralRenderingFeatureControls = .init()
+    featureControls: NeuralRenderingFeatureControls = .init(),
+    extension indices: NeuralRenderingExtensionIndices? = nil
   ) -> MLXArray {
     process(
       baseFeatures: color,
@@ -1003,6 +1091,7 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
       controlMask: controlMask,
       noiseFrameIndex: noiseFrameIndex,
       generateBaseFeatures: true,
+      extension: indices,
       history: history,
       historyTransform: historyTransform,
       motion: motion,
@@ -1021,6 +1110,7 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
     controlMask: MLXArray?,
     noiseFrameIndex: UInt32,
     generateBaseFeatures: Bool,
+    extension indices: NeuralRenderingExtensionIndices? = nil,
     history: MLXArray,
     historyTransform: NeuralRenderingTextureTransform?,
     motion: MLXArray,
@@ -1059,6 +1149,7 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
     )
     template += [
       ("generateBaseFeatures", generateBaseFeatures),
+      ("extended", indices != nil),
       ("hasHistoryConfidence", historyConfidence != nil),
       ("depthInverted", depthInverted),
       ("useClosestDepth", depthGuideMode == .closestDepth),
@@ -1088,11 +1179,13 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
         motion,
         depth,
         historyConfidence ?? depth,
+        indices?.rows ?? NeuralRenderingExtensionIndices.none,
+        indices?.columns ?? NeuralRenderingExtensionIndices.none,
       ],
       template: template,
-      grid: (baseFeatures.shape[2], baseFeatures.shape[1], 1),
+      grid: (indices?.columns.size ?? logicalWidth, indices?.rows.size ?? logicalHeight, 1),
       threadGroup: (8, 8, 1),
-      outputShapes: [[1, logicalHeight, logicalWidth, 16]],
+      outputShapes: [[1, indices?.rows.size ?? logicalHeight, indices?.columns.size ?? logicalWidth, 16]],
       outputDTypes: [.float32]
     )[0]
   }
@@ -1191,24 +1284,32 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
     """#
 
   private static let source = #"""
-    uint xPosition = thread_position_in_grid.x;
-    uint yPosition = thread_position_in_grid.y;
+    // On a padded network extent (`extended`), the thread's network pixel
+    // writes the features of its source pixel (xPosition, yPosition); only the
+    // noise depends on the network pixel itself.
+    uint gridX = thread_position_in_grid.x;
+    uint gridY = thread_position_in_grid.y;
     int height = baseFeatures_shape[1];
     int width = baseFeatures_shape[2];
-    if (xPosition >= uint(width) || yPosition >= uint(height)) {
+    int outputWidth = extended ? int(columns_shape[0]) : width;
+    int outputHeight = extended ? int(rows_shape[0]) : height;
+    if (gridX >= uint(outputWidth) || gridY >= uint(outputHeight)) {
       return;
     }
+    uint xPosition = extended ? uint(columns[gridX]) : gridX;
+    uint yPosition = extended ? uint(rows[gridY]) : gridY;
     int pixel = int(yPosition) * width + int(xPosition);
-    int featureOffset = pixel * 16;
+    int featureOffset = (int(gridY) * outputWidth + int(gridX)) * 16;
     if (generateBaseFeatures) {
-      mlxdlssWriteFirstFrameFeatures(
+      mlxdlssWriteFirstFrameFeaturesAt(
         output,
+        uint(featureOffset),
         color,
         controlMask,
+        uint(pixel) * 3,
         frameIndex,
-        xPosition,
-        yPosition,
-        uint(width),
+        gridX,
+        gridY,
         featureControls[0],
         featureControls[1],
         featureControls[2],
@@ -1219,7 +1320,7 @@ final class MLXTemporalFeatureProcessor: @unchecked Sendable {
       );
     } else {
       for (int channel = 0; channel < 16; ++channel) {
-        output[featureOffset + channel] = baseFeatures[featureOffset + channel];
+        output[featureOffset + channel] = baseFeatures[pixel * 16 + channel];
       }
     }
 

@@ -22,6 +22,7 @@ public enum MLXBackendError: Error, Equatable, Sendable {
         actual: ModelStateKind
     )
     case compiledExecutionUnsupported(architecture: String)
+    case unsupportedTopology(String)
 }
 
 struct ValidatedWeights {

@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from . import model as reference
+from . import topology as _topology
 from .composition import compose_detail, compose_head, resample
 from .features import PROFILES, AutomaticMask, NetworkGeometry, make_features
 
@@ -36,18 +37,41 @@ def resolve_device(device: str | torch.device = "auto") -> torch.device:
     return torch.device(device)
 
 
-def load_weight_spec() -> dict[str, dict[str, Any]]:
-    return json.loads(_SPEC_PATH.read_text())["tensors"]
+def load_weight_spec(topology: _topology.Topology = _topology.HT) -> dict[str, dict[str, Any]]:
+    """Expected logical tensors of a topology.
+
+    ``weight_spec.json`` lists the 71-block HT network; any other topology reuses
+    the tensors of the HT block with the same family and width under its own
+    block index (the vendor packs every block family identically).
+    """
+    spec = json.loads(_SPEC_PATH.read_text())["tensors"]
+    if topology == _topology.HT:
+        return spec
+    prototypes: dict[tuple[str, int], int] = {}
+    for block in _topology.HT.blocks:
+        prototypes.setdefault((block.family, block.channels), block.index)
+    by_block: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    for name, entry in spec.items():
+        index, _, suffix = name.removeprefix("block").partition(".")
+        by_block.setdefault(int(index), []).append((suffix, entry))
+    result: dict[str, dict[str, Any]] = {}
+    for block in topology.blocks:
+        for suffix, entry in by_block[prototypes[(block.family, block.channels)]]:
+            result[f"block{block.index}.{suffix}"] = entry
+    return result
 
 
-def validate_weights(weights: dict[str, torch.Tensor]) -> None:
-    spec = load_weight_spec()
+def validate_weights(weights: dict[str, torch.Tensor]) -> _topology.Topology:
+    """Check a logical weight map against its inferred topology and return the topology."""
+    topology = _topology.infer_logical({name: tuple(value.shape) for name, value in weights.items()})
+    spec = load_weight_spec(topology)
     missing = sorted(set(spec) - set(weights))
     if missing:
         raise ValueError(f"weights are missing {len(missing)} tensors, first: {missing[:3]}")
     for name, entry in spec.items():
         if list(weights[name].shape) != entry["shape"]:
             raise ValueError(f"{name}: expected shape {entry['shape']}, got {list(weights[name].shape)}")
+    return topology
 
 
 def load_weights(path: str | pathlib.Path) -> dict[str, torch.Tensor]:
@@ -83,10 +107,11 @@ class NeuralRenderingPipeline:
     def __init__(self, weights: dict[str, torch.Tensor], *, device: str | torch.device = "auto", precision: str = "reference"):
         if precision not in PRECISIONS:
             raise ValueError(f"precision must be one of {PRECISIONS}")
-        validate_weights(weights)
+        self.topology = validate_weights(weights)
         self.device = resolve_device(device)
         self.precision = precision
-        self.model = reference.NeuralRenderingModel(weights).eval()
+        self.model = reference.NeuralRenderingModel(weights, self.topology).eval()
+        self.blend_scale = self.model.blend_scale
         self.dtype = torch.float32
         if precision == "fast":
             if self.device.type == "cpu":

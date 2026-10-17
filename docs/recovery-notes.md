@@ -17,8 +17,9 @@ The loader rejects malformed manifests, nested or absolute weight paths, missing
 
 The executable architecture identifier is `mlxdlss.neural-rendering-transformer.v1`; `mlxdlss.pixel-affine.v1` is the test fixture that exercises package plumbing.
 
-The experimental neural-rendering architecture executes its complete 71-block
-MLX graph only with a user-supplied external package. Eager execution is the
+The experimental neural-rendering architecture executes its complete MLX
+graph (71 blocks for HT, 31 for the [small network](#the-small-fp8-network))
+only with a user-supplied external package. Eager execution is the
 portable Mac candidate, not yet an NVIDIA or cross-backend oracle. The opt-in
 `metal-fused` mode uses native Metal simdgroup matrices for the wide branched
 FFNs. Whole-graph compilation remains rejected because it changes the recovered
@@ -150,6 +151,36 @@ byte-exact no-ops at zero transfer strength. They are separate from the
 four-channel neural-head postprocessor so callers can A/B the raw checkpoint
 contract and the display codec independently while NVIDIA golden capture is
 still pending.
+
+## The small FP8 network
+
+`nvngx_dlssnr.dll` 310.9.16.0 carries two weight resources: `WEIGHTS_HT`,
+byte-identical to the only network of 310.8.0.0, and `WEIGHTS_CC_SMALL_FP8`
+(`hnet-crazy-cuckoo-small-fp8`). The DLL's `CCNetwork` factory builds both
+from five stage depths, one per encoder width (32, 64, 128, 256) plus the
+512-channel split stage, mirrored by the decoder around the eight global
+blocks and the bridge:
+
+| network | depths | blocks | preset |
+| --- | --- | --- | --- |
+| HT | 4, 4, 6, 8, 8 | 71 | 1 |
+| small | 2, 2, 2, 2, 2 | 31 | 2, the 310.9.16 shipping default |
+
+Both use the same kernel families, widths, head counts and layer packing, so
+one decoder (`mlxdlss-weights decode`) and one package architecture serve
+both. `mlxdlss.topology` and `NeuralRenderingTopology` recover the depths from
+the tensor shapes; a package needs no extra manifest field. The window origin
+of a block depends only on its position in its stage: phase `i & 3` for the
+`i`-th encoder block, `(depth + j) & 3` for the `j`-th decoder block of the
+mirrored stage, and phase 1 for the post block.
+
+`mlxdlss-weights all` writes `NeuralRendering-Small.dlssmodel` and
+`dlssnr-small-weights-logical.safetensors` beside the HT outputs. The MLX
+graph matches the PyTorch reference stage by stage on the small weights
+(teacher-forced, relative MAE `0.0002–0.02`; global stage and bridge exact).
+No vendor capture of the small network exists: this work does not run the
+DLL, so the small network has no NVIDIA parity number. Its kernels are the
+ones whose HT parity is recorded above.
 
 ## Temporal command-line reference
 
@@ -283,15 +314,16 @@ can still drift; these checks do not establish universal ghost-free behavior.
 
 ## Roadmap
 
-Done: the 71-block graph on MLX/Metal, PyTorch and Core ML with measured gates
-against the NVIDIA DLL; fused Metal kernels for attention and glue; video
+Done: the 71-block HT graph on MLX/Metal, PyTorch and Core ML with measured gates
+against the NVIDIA DLL; the 31-block small graph of 310.9.16 on MLX/Metal and
+PyTorch, checked against the PyTorch reference; fused Metal kernels for attention and glue; video
 conversion with the temporal path; the frame generator on both backends,
 verified against the vendor's library; the web front end.
 
 Open:
 
 1. NVIDIA golden parity for the temporal path. Measured so far on one private vendor capture (`.lab/oracle-static-seq/.../base-b`, 64 frames of one 256×256 frame with zero motion, depth 1, no jitter, through the golden-bundle tools): `mlxdlss run-sequence --input-format rgb-temporal-reference` matches the vendor at MAE `0.0054` (max `0.12`, `42.3` dB) over all 64 frames, and the drift from frame 0 tracks the vendor's (vendor `0.0050 → 0.0181` MAE from frame 0 over 63 frames, ours `0.0055 → 0.0173`), so the recurrence adds no error beyond the single-frame level. Not captured: motion, jitter, disocclusion and mask cases (the feeder or the pod oracle would have to record them).
-2. Accelerator-resident neural rendering. Done: the 16 base feature channels are generated on the GPU (`MLXFirstFrameFeatureProcessor`, fused with the history reprojection for identity geometry; `MLXDLSS_NR_DEVICE_FEATURES=0` restores the CPU preprocessor), bit-identical to the CPU path because both evaluate the noise with the same software `log`/`sin`/`cos` (`NeuralRenderingNoiseMath`; library functions differ by an ulp at a few pixels per frame and the network turns that into a 0.09 output difference). Remaining: the float32 readback and `Data` copies of the output (`asArray` → `HostTensor`), the float32 pipe of `mlxdlss stream` (colour, motion, depth in; colour out), and the CPU postprocessor of the first-frame command.
+2. Accelerator-resident neural rendering. Done: the 16 base feature channels are generated on the GPU (`MLXFirstFrameFeatureProcessor`, fused with the history reprojection and evaluated directly on the padded network extent; `MLXDLSS_NR_DEVICE_FEATURES=0` restores the CPU preprocessor), bit-identical to the CPU path because both evaluate the noise with the same software `log`/`sin`/`cos` (`NeuralRenderingNoiseMath`; library functions differ by an ulp at a few pixels per frame and the network turns that into a 0.09 output difference). Remaining: the float32 readback and `Data` copies of the output (`asArray` → `HostTensor`), the float32 pipe of `mlxdlss stream` (colour, motion, depth in; colour out), and the CPU postprocessor of the first-frame command.
 3. Frame generation on Metal. Done: every stage takes a batch (phases of a pair, `--batch` consecutive pairs) and the frame server speaks uint8 (540p 12.6 → 6.2 ms, 1080p 45 → 26 ms per generated frame at steady state). The GPU time itself is throughput-bound already at one frame (4.6 ms at 960×540, 27 ms at 1080p; batching gains ≤ 16 %), so the next lever is convolution efficiency: the per-pixel kernel reuses no input across output pixels; a tiled `simdgroup_matrix` kernel with the halo in threadgroup memory is the candidate (the existing `MLXDLSS_FG_SIMD=1` kernel reuses weights only).
 4. Frame generation inputs the library has and video does not use: motion vectors, depth, HUD compositing, disocclusion inpainting (low priority: none of them exist for plain video).
 5. Neural rendering inputs. The network sees 16 channels per pixel: three deterministic noise channels (0–2), a constant one (3), the scaled colour twice (4–6 and 7–9; the temporal path replaces 7–9 with the reprojected previous output), the style index (10), the tone and structure strengths (11–12, per pixel through the green and blue channels of a control mask) and the skin/automatic-mask structure strengths (13–14; the vendor fills them from its own segmentation, which is not part of the port). No depth, motion or material inputs exist. Ways to enrich the path without new weights: per-pixel tone/structure masks from a segmentation model (faces, skin, sky, text) or from a saliency map, standing in for the vendor's automatic mask; a user-drawn or tracked control mask for video; and the history channels, which already accept any reprojected image (a denoised or super-resolved previous frame, not only the network's own output).

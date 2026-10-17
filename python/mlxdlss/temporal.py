@@ -288,7 +288,8 @@ class TemporalOptions:
     processing_scale: float = 1.0
     robust_motion: bool = True
     profile: str = "standard"
-    blend_scale: float = BLEND_SCALE
+    blend_scale: float | None = None
+    """Temporal blend cap; ``None`` uses the network's own (HT ``BLEND_SCALE``, small 0.767)."""
     intensity: float = 1.0
     scene_cut_threshold: float = 0.3
     detail_strength: float = 1.0
@@ -367,7 +368,10 @@ class TemporalSession:
                                               history_confidence=confidence, control_mask=control_mask, **controls)
             network = extend_features(features, geometry, self.frame_index)
             head = geometry.crop(self.pipeline.run_features(network))
-            output = compose_temporal(head, processing, features, blend_scale=self.options.blend_scale,
+            blend_scale = self.options.blend_scale
+            if blend_scale is None:
+                blend_scale = getattr(self.pipeline, "blend_scale", None) or BLEND_SCALE
+            output = compose_temporal(head, processing, features, blend_scale=blend_scale,
                                       history_confidence=confidence, control_mask=control_mask, intensity=self.options.intensity)
         self.history = output.copy(); self.previous = frame.copy(); self.frame_index += 1
         return compose_detail(

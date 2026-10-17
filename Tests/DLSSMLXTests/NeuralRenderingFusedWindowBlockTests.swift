@@ -115,9 +115,7 @@ final class NeuralRenderingFusedWindowBlockTests: XCTestCase {
 
   func testExternalWeightsParityAndTimingWhenConfigured() throws {
     let environment = ProcessInfo.processInfo.environment
-    guard let weightsPath = environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS (and MLXDLSS_FUSED_TIMING=HEIGHTxWIDTH)")
-    }
+    let weightsPath = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS (and MLXDLSS_FUSED_TIMING=HEIGHTxWIDTH)")
     let shape = environment["MLXDLSS_FUSED_TIMING"] ?? "544x960"
     let parts = shape.split(separator: "x").compactMap { Int($0) }
     let arrays = try loadArrays(url: URL(fileURLWithPath: weightsPath), stream: .cpu)

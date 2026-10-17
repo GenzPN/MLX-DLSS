@@ -70,7 +70,10 @@ final class AppModel {
 
   init() {
     let defaults = UserDefaults.standard
-    modelPath = defaults.string(forKey: "renderingModel") ?? Self.locateWeight("NeuralRendering.dlssmodel")
+    // The small network is the shipping default of nvngx_dlssnr.dll 310.9.16.
+    modelPath = defaults.string(forKey: "renderingModel")
+      ?? ["NeuralRendering-Small.dlssmodel", "NeuralRendering.dlssmodel"].lazy.map(Self.locateWeight).first { !$0.isEmpty }
+      ?? ""
     generationPath = defaults.string(forKey: "generationWeights") ?? Self.locateWeight("framegen.safetensors")
     superResolutionPath = defaults.string(forKey: "superResolutionWeights") ?? Self.locateWeight("vsr.safetensors")
     dlssSuperResolutionPath = defaults.string(forKey: "dlssSuperResolutionModel") ?? Self.locateWeight("dlss-sr.srmodel")
@@ -155,6 +158,36 @@ final class AppModel {
       else { modelPath = url.path }
       savePaths()
     }
+  }
+
+  /// The two networks of `nvngx_dlssnr.dll` 310.9.16, which `mlxdlss-weights all`
+  /// writes side by side as `NAME.dlssmodel` and `NAME-Small.dlssmodel`.
+  enum RenderingNetwork: String, CaseIterable, Identifiable {
+    case small = "Small", ht = "HT"
+    var id: Self { self }
+  }
+
+  /// Networks whose package sits beside the chosen one.
+  var renderingNetworks: [RenderingNetwork] {
+    RenderingNetwork.allCases.filter { networkPath($0).map(FileManager.default.fileExists(atPath:)) ?? false }
+  }
+
+  var renderingNetwork: RenderingNetwork {
+    get { URL(fileURLWithPath: modelPath).deletingPathExtension().lastPathComponent.hasSuffix("-Small") ? .small : .ht }
+    set {
+      guard let path = networkPath(newValue), path != modelPath else { return }
+      modelPath = path
+      savePaths()
+    }
+  }
+
+  private func networkPath(_ network: RenderingNetwork) -> String? {
+    guard !modelPath.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: modelPath)
+    var name = url.deletingPathExtension().lastPathComponent
+    if name.hasSuffix("-Small") { name.removeLast("-Small".count) }
+    let file = name + (network == .small ? "-Small" : "") + ".dlssmodel"
+    return url.deletingLastPathComponent().appendingPathComponent(file).path
   }
 
   func chooseOutputDirectory() {

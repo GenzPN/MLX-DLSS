@@ -1,15 +1,17 @@
 """``mlxdlss-weights``: bring-your-own-DLL tooling.
 
-    mlxdlss-weights extract  nvngx_dlssnr.dll packed.safetensors     # packed intermediate (the DLL's WEIGHTS_HT resource)
+    mlxdlss-weights extract  nvngx_dlssnr.dll packed.safetensors [--resource WEIGHTS_CC_SMALL_FP8]  # packed intermediate of one network
     mlxdlss-weights decode   packed.safetensors logical.safetensors  # logical tensors for PyTorch (and every converter)
     mlxdlss-weights mlx      logical.safetensors Model.dlssmodel      # MLX-DLSS MLX package (Swift mlxdlss)
     mlxdlss-weights coreml   logical.safetensors Model.mlpackage --width W --height H   # fixed-shape Core ML (needs coremltools)
-    mlxdlss-weights all      nvngx_dlssnr.dll OUTPUT_DIR [--coreml WxH ...]             # everything in one go
+    mlxdlss-weights all      nvngx_dlssnr.dll OUTPUT_DIR [--coreml WxH ...]             # every network of the DLL in one go
     mlxdlss-weights inspect  packed.safetensors                     # list what an (unknown) DLL version contains
 
 The DLL is never redistributed: users take it from their own NVIDIA driver,
-game install or Streamline SDK package (bin/x64/nvngx_dlssnr.dll). The
-supported build is identified by its SHA-256 and FileVersion 310.8.0.0.
+game install or Streamline SDK package (bin/x64/nvngx_dlssnr.dll). Supported
+builds are identified by their SHA-256: FileVersion 310.8.0.0 carries the
+71-block HT network (``WEIGHTS_HT``); 310.9.16.0 adds the 31-block small FP8
+network (``WEIGHTS_CC_SMALL_FP8``, its shipping default preset) and keeps HT.
 """
 from __future__ import annotations
 
@@ -27,6 +29,16 @@ KNOWN_DLL_SHA256 = {
     "08a39bcd6c032c5fec20821c44abfd99a8ad85bbff460e5cc945f35ba67d67a3": "dlssnr-weights-packed.safetensors (WEIGHTS_HT of the supported DLL)",
     # the same intermediate as produced by the earlier standalone extractor
     "1febdf3e3fc868b48e330cea21903927303fb14cd87766169e24bbdf288a9473": "dlssnr-weights-packed.safetensors (supported DLL, earlier extractor metadata)",
+    # clean NVIDIA-signed 310.8.0.0 (CL 38718415); same WEIGHTS_HT as above
+    "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e": "supported nvngx_dlssnr.dll (FileVersion 310.8.0.0, signed)",
+    # NVIDIA-signed 310.9.16.0 (CL 39025366): WEIGHTS_HT (unchanged) + WEIGHTS_CC_SMALL_FP8
+    "2bc19bc09a7b89dd44f73e2ac0108fcc586e2154bdd0830f242f4f040e28789f": "supported nvngx_dlssnr.dll (FileVersion 310.9.16.0: HT + small FP8)",
+}
+
+# Output names per network resource; the small network is the 310.9.16 shipping default.
+NETWORK_OUTPUTS = {
+    "WEIGHTS_HT": ("dlssnr-weights", ""),
+    "WEIGHTS_CC_SMALL_FP8": ("dlssnr-small-weights", "-Small"),
 }
 
 
@@ -38,11 +50,11 @@ def sha256_of(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def _extract(source: pathlib.Path, destination: pathlib.Path, resource_blob: bool = False) -> int:
+def _extract(source: pathlib.Path, destination: pathlib.Path, resource_blob: bool = False, resource: str | None = None) -> int:
     from . import extract_dlssnr_weights
 
-    argv = [str(source), str(destination)] + (["--resource-blob"] if resource_blob else [])
-    return extract_dlssnr_weights.main(argv) if _accepts_argv(extract_dlssnr_weights.main) else _run_with_argv(extract_dlssnr_weights.main, argv)
+    argv = [str(source), str(destination)] + (["--resource-blob"] if resource_blob else []) + (["--resource", resource] if resource else [])
+    return _run_with_argv(extract_dlssnr_weights.main, argv)
 
 
 def _decode(source: pathlib.Path, destination: pathlib.Path) -> int:
@@ -107,7 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     extract = commands.add_parser("extract", help="DLL -> packed intermediate safetensors")
     extract.add_argument("dll", type=pathlib.Path); extract.add_argument("destination", type=pathlib.Path)
-    extract.add_argument("--resource-blob", action="store_true", help="source is an already extracted WEIGHTS_HT resource")
+    extract.add_argument("--resource", default=None, help="network resource: WEIGHTS_HT (default) or WEIGHTS_CC_SMALL_FP8 (310.9.16+)")
+    extract.add_argument("--resource-blob", action="store_true", help="source is an already extracted resource")
     decode = commands.add_parser("decode", help="packed intermediate -> logical safetensors")
     decode.add_argument("packed", type=pathlib.Path); decode.add_argument("destination", type=pathlib.Path)
     mlx = commands.add_parser("mlx", help="logical safetensors -> .dlssmodel package for the Swift/MLX runtime")
@@ -116,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     coreml.add_argument("logical", type=pathlib.Path); coreml.add_argument("destination", type=pathlib.Path)
     coreml.add_argument("--width", type=int, default=320); coreml.add_argument("--height", type=int, default=320)
     coreml.add_argument("--precision", default="float16", choices=("float16", "float32"))
-    everything = commands.add_parser("all", help="DLL -> packed, logical and .dlssmodel (plus optional Core ML sizes)")
+    everything = commands.add_parser("all", help="DLL -> packed, logical and .dlssmodel of every network it carries (plus optional Core ML sizes)")
     everything.add_argument("dll", type=pathlib.Path); everything.add_argument("output_dir", type=pathlib.Path)
     everything.add_argument("--coreml", action="append", default=[], metavar="WxH", help="also build a Core ML package at this size (repeatable)")
     everything.add_argument("--coreml-precision", default="float16", choices=("float16", "float32"))
@@ -125,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("packed", type=pathlib.Path)
     digest = commands.add_parser("sha256", help="print the SHA-256 and file version of a DLL and whether it is a known checkpoint")
     digest.add_argument("path", type=pathlib.Path)
-    framegen = commands.add_parser("extract-fg", help="libnvidia-ngx-dlssg.so -> dense frame generation safetensors for mlxdlss-video / FrameGenerator")
+    framegen = commands.add_parser("extract-fg", help="libnvidia-ngx-dlssg.so or nvngx_dlssg.dll -> dense frame generation safetensors for mlxdlss-video / FrameGenerator")
     framegen.add_argument("library", type=pathlib.Path); framegen.add_argument("destination", type=pathlib.Path)
     vsr = commands.add_parser("extract-vsr", help="VSR 1.8.2 library -> High Bitrate Low 2x weights for native Metal")
     vsr.add_argument("library", type=pathlib.Path); vsr.add_argument("destination", type=pathlib.Path)
@@ -159,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return package_sr([str(args.library), str(args.capture), str(args.destination)])
     if args.command == "extract":
-        return _extract(args.dll, args.destination, args.resource_blob)
+        return _extract(args.dll, args.destination, args.resource_blob, args.resource)
     if args.command == "decode":
         return _decode(args.packed, args.destination)
     if args.command == "mlx":
@@ -167,20 +180,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "coreml":
         return _coreml(args.logical, args.destination, args.width, args.height, args.precision)
     if args.command == "all":
+        from .extract_dlssnr_weights import list_rcdata_resources
+
         out = args.output_dir; out.mkdir(parents=True, exist_ok=True)
         print(f"dll sha256 {sha256_of(args.dll)}")
-        packed = out / "dlssnr-weights-packed.safetensors"; logical = out / "dlssnr-weights-logical.safetensors"; mlx = out / f"{args.name}.dlssmodel"
-        for step, function in (("extract", lambda: _extract(args.dll, packed)), ("decode", lambda: _decode(packed, logical)), ("mlx", lambda: _mlx(logical, mlx))):
-            code = function()
-            if code:
-                print(f"{step} failed with code {code}", file=sys.stderr); return code
-            print(f"{step}: ok")
-        for size in args.coreml:
-            width, height = (int(v) for v in size.lower().split("x"))
-            code = _coreml(logical, out / f"{args.name}-{width}x{height}-{args.coreml_precision}.mlpackage", width, height, args.coreml_precision)
-            if code:
-                return code
-            print(f"coreml {size}: ok")
+        present = set(list_rcdata_resources(args.dll.read_bytes()))
+        resources = [name for name in NETWORK_OUTPUTS if name in present]
+        if not resources:
+            print(f"no known network resource in {args.dll} (found {sorted(present)})", file=sys.stderr); return 2
+        for resource in resources:
+            stem, suffix = NETWORK_OUTPUTS[resource]
+            packed = out / f"{stem}-packed.safetensors"; logical = out / f"{stem}-logical.safetensors"; mlx = out / f"{args.name}{suffix}.dlssmodel"
+            steps = (
+                ("extract", lambda: _extract(args.dll, packed, resource=resource)),
+                ("decode", lambda: _decode(packed, logical)),
+                ("mlx", lambda: _mlx(logical, mlx)),
+            )
+            for step, function in steps:
+                code = function()
+                if code:
+                    print(f"{resource} {step} failed with code {code}", file=sys.stderr); return code
+                print(f"{resource} {step}: ok")
+            for size in args.coreml:
+                width, height = (int(v) for v in size.lower().split("x"))
+                code = _coreml(logical, out / f"{args.name}{suffix}-{width}x{height}-{args.coreml_precision}.mlpackage", width, height, args.coreml_precision)
+                if code:
+                    return code
+                print(f"{resource} coreml {size}: ok")
         print(f"artifacts in {out}")
         return 0
     return 2

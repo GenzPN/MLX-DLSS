@@ -25,7 +25,7 @@ from typing import Callable
 import numpy as np
 
 from .composition import compose_detail, resample
-from .temporal import BLEND_SCALE, FlowMotionEstimator, zero_motion, resolve_motion, prepare_temporal_frame
+from .temporal import FlowMotionEstimator, zero_motion, resolve_motion, prepare_temporal_frame
 
 RESET_FLAG = 1
 
@@ -49,7 +49,7 @@ class MLXDLSSStreamSession:
                  motion: Callable | str = "flow", scene_cut_threshold: float = 0.3, mlxdlss: str | None = None,
                  profile: str = "standard", intensity: float = 1.0, execution: str = "metal-fused",
                  precision: str = "float16", processing_scale: float = 1.0, detail_strength: float = 1.0,
-                 colour_strength: float = 1.0, detail_radius: float = 4.0, blend_scale: float = BLEND_SCALE,
+                 colour_strength: float = 1.0, detail_radius: float = 4.0, blend_scale: float | None = None,
                  robust_motion: bool = True, protocol_version: int = 4,
                  framegen_weights: str | Path | None = None, framegen_factor: int = 2,
                  framegen_batch: int = 4, framegen_precision: str = "float16", output_format: str = "f32"):
@@ -94,7 +94,9 @@ class MLXDLSSStreamSession:
                    "--mode", "temporal" if temporal else "first-frame", "--execution", execution,
                    "--precision", precision, "--profile", profile, "--intensity", str(intensity)]
         if temporal:
-            command += ["--protocol-version", str(protocol_version), "--blend-scale", str(blend_scale)]
+            command += ["--protocol-version", str(protocol_version)]
+            if blend_scale is not None:
+                command += ["--blend-scale", str(blend_scale)]
             if protocol_version == 4:
                 command += ["--output-width", str(width), "--output-height", str(height),
                             "--detail-strength", str(detail_strength), "--colour-strength", str(colour_strength),

@@ -238,7 +238,7 @@ enum StreamCommand {
     let computePrecision: MLXComputePrecision
     let depthInverted: Bool
     let protocolVersion: Int
-    let blendScale: Float
+    let blendScale: Float?
     let options: FirstFrameOptions
     let videoOutput: MLXVideoOutputOptions?
     let frameGeneration: MLXVideoFrameGenerationOptions?
@@ -275,7 +275,10 @@ enum StreamCommand {
     guard let protocolVersion = Int(values["--protocol-version"] ?? "1"), [1, 2, 3, 4].contains(protocolVersion) else {
       throw CLIError.usage("stream --protocol-version must be 1, 2, 3 or 4")
     }
-    let blendScale = try floatOption("--blend-scale", values: values, default: 0.739_746_093_75)
+    // Without --blend-scale the temporal backend uses the package's own cap.
+    let blendScale = try values["--blend-scale"].map { _ in
+      try floatOption("--blend-scale", values: values, default: 0)
+    }
     let mode = try enumeration(Mode.self, values["--mode"], default: .temporal, message: "stream mode must be 'temporal' or 'first-frame'")
     let executionMode = try enumeration(
       MLXExecutionMode.self, values["--execution"], default: .metalFused,

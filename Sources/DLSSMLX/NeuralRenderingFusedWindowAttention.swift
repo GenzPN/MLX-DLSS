@@ -16,6 +16,16 @@ import MLX
 /// and per-row softmax totals, half arithmetic everywhere else. Tokens outside
 /// the image (shifted origins, ragged edges) behave like the zero padding of
 /// the per-operation path: their q/k/v are zero and their outputs are dropped.
+///
+/// Eight simdgroups share a (window, head); each keeps one window row in
+/// simdgroup-matrix registers. Threadgroup memory holds the keys and values
+/// (8 KB) and 512 bytes of scratch per simdgroup (12 KB in all). The per-token
+/// norms are the vendor's xor reduction over the four lanes of a fragment row,
+/// exchanged through the simdgroup's own value rows, and every lane adds up its
+/// softmax row in the recovered order after reading it back from the scratch
+/// (2026-10-17, M2 Max: 25-60% faster than four simdgroups staging the whole
+/// rows; the scratch totals instead of 32 lane shuffles per row: another
+/// 16-25% from 68x120 up; bit-identical: `NeuralRenderingKernelVariantTests`).
 /// Small integer parameter buffers for the custom kernels, kept alive for
 /// the process. A parameter array created per call is released as soon as
 /// its consumer is encoded, and MLX's concurrent command encoder only
@@ -35,26 +45,35 @@ enum NeuralRenderingKernelParameters {
 
 enum NeuralRenderingFusedWindowAttention {
   static let windowSize = 8
-  static let simdgroupsPerWindow = 4
-  private static let kernel = MLXFast.metalKernel(
-    name: "mlxdlss_window_attention_core",
-    inputNames: ["qkv", "attentionScale", "attentionBias", "params"],
-    outputNames: ["output"],
-    source: #"""
-      // Threadgroup memory (halfs): K 0..2048, V 2048..4096, 640 of scratch per simdgroup
-      // (512 for the query rows / scores, then 16 reciprocals).
-      threadgroup half4 arena4[(4096 + 4 * (shuffleReciprocals ? 512 : 640)) / 4];
+  /// One simdgroup per window row: eight per (window, head).
+  static let simdgroupsPerWindow = 8
+  private static let kernel = makeKernel(name: "mlxdlss_window_attention_core", source: source)
+
+  /// Builds the kernel from `source` (earlier versions of it in the A/B probes).
+  static func makeKernel(name: String, source: String) -> MLXFast.MLXFastKernel {
+    MLXFast.metalKernel(
+      name: name,
+      inputNames: ["qkv", "attentionScale", "attentionBias", "params"],
+      outputNames: ["output"],
+      source: source,
+      header: "#include <metal_simdgroup_matrix>\n" + NeuralRenderingTransformerOperations.e4m3MetalHeaderText
+    )
+  }
+
+  static let source = #"""
+      // Threadgroup memory: the window's normalised keys (0..2048) and published
+      // values (2048..4096) of this head, and 256 halfs of scratch per simdgroup
+      // (4096..6144) for the softmax totals. Everything else stays in registers.
+      threadgroup half4 arena4[6144 / 4];
       threadgroup half* arena = (threadgroup half*)arena4;
       threadgroup half* K = arena;
       threadgroup half* V = arena + 2048;
-      threadgroup half4* K4 = (threadgroup half4*)K;
-      threadgroup half4* V4 = (threadgroup half4*)V;
       const uint simd = simdgroup_index_in_threadgroup;
-      const uint lane = thread_index_in_simdgroup;
-      const uint tid = thread_position_in_threadgroup.x;
-      threadgroup half* T = arena + 4096 + simd * (shuffleReciprocals ? 512 : 640);
-      threadgroup half4* T4 = (threadgroup half4*)T;
-      threadgroup half* R = T + 512;   // reused: 16 reciprocals (query norm), 8 (softmax)
+      const ushort lane = thread_index_in_simdgroup;
+      // Element (fragmentRow, fragmentColumn + e) of an 8x8 simdgroup matrix is
+      // thread_elements()[e] of this lane. Rows are window tokens, columns channels.
+      const ushort fragmentRow = ((lane / 4) & 4) + ((lane / 2) % 4);
+      const ushort fragmentColumn = ((lane / 4) & 2) * 2 + (lane % 2) * 2;
 
       const uint height = params[0];
       const uint width = params[1];
@@ -68,244 +87,171 @@ enum NeuralRenderingFusedWindowAttention {
       const uint windowIndex = threadgroup_position_in_grid.x / headCount;
       const uint windowY = windowIndex / windowsX;
       const uint windowX = windowIndex % windowsX;
-      const int rowY0 = int(windowY * 8) - int(padTop);
-      const int colX0 = int(windowX * 8) - int(padLeft);
-      const device half4* qkv4 = (const device half4*)qkv;
-      device half4* output4 = (device half4*)output;
-      const device half4* attentionBias4 = (const device half4*)attentionBias;
+      const int y = int(windowY * 8) - int(padTop) + int(simd);
+      const int x = int(windowX * 8) - int(padLeft) + int(fragmentRow);
+      const bool inside = y >= 0 && y < int(height) && x >= 0 && x < int(width);
+      const uint pixel = inside ? uint(y) * width + uint(x) : 0;
+      const device half2* qkv2 = (const device half2*)qkv;
+      device half2* output2 = (device half2*)output;
+      const device half2* attentionBias2 = (const device half2*)attentionBias;
       const half scale = attentionScale[head];
 
-      // Phase 0: this simdgroup's 16 tokens. Keys: stage, cosine-normalise (one
-      // lane per token, sequential partial sums), publish into the shared K rows.
-      // Values: stage, publish into the shared V rows.
-      for (uint part = 1; part < 3; ++part) {
-        for (uint i = lane; i < 128; i += 32) {
-          const uint token = simd * 16 + i / 8;
-          const int y = rowY0 + int(token / 8);
-          const int x = colX0 + int(token % 8);
-          const bool in = y >= 0 && y < int(height) && x >= 0 && x < int(width);
-          T4[i] = in ? qkv4[((uint(y) * width + uint(x)) * rowStride + part * channels + head * 32) / 4 + i % 8] : half4(0.0h);
+      // Phase 0: this simdgroup's window row (8 tokens) of k, v and q straight
+      // into fragments (zeros outside the image). A token's 32 values sit on the
+      // four lanes of its fragment row, so the vendor's cosine norm is the
+      // two-step xor reduction over those lanes (lane bit 3, then bit 0).
+      simdgroup_matrix<half, 8, 8> qt[4];
+      _Pragma("clang loop unroll(full)")
+      for (uint part = 0; part < 3; ++part) {
+        simdgroup_matrix<half, 8, 8> tile[4];
+        const uint base = (pixel * rowStride + part * channels + head * 32 + fragmentColumn) / 2;
+        _Pragma("clang loop unroll(full)")
+        for (uint o = 0; o < 4; ++o) {
+          const half2 value = inside ? qkv2[base + o * 4] : half2(0.0h);
+          tile[o].thread_elements()[0] = value.x;
+          tile[o].thread_elements()[1] = value.y;
         }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        if (part == 1) {
-          half reciprocalNorm = 0.0h;
-          if (lane < 16) {
-            threadgroup half* vec = T + lane * 32;
-            half value[32];
-            for (uint c = 0; c < 32; ++c) { value[c] = vec[c]; }
-            half partial[4][2];
-            for (uint l = 0; l < 4; ++l) {
-              for (uint parity = 0; parity < 2; ++parity) {
-                uint c = l * 2 + parity;
-                half first = fma(value[c + 8], value[c + 8], value[c] * value[c]);
-                half second = fma(value[c + 24], value[c + 24], value[c + 16] * value[c + 16]);
-                partial[l][parity] = first + second;
-              }
-            }
-            half xorTwo[4][2];
-            for (uint l = 0; l < 4; ++l) {
-              for (uint parity = 0; parity < 2; ++parity) {
-                xorTwo[l][parity] = partial[l][parity] + partial[l ^ 2][parity];
-              }
-            }
-            half xorOne[4][2];
-            for (uint l = 0; l < 4; ++l) {
-              for (uint parity = 0; parity < 2; ++parity) {
-                xorOne[l][parity] = xorTwo[l][parity] + xorTwo[l ^ 1][parity];
-              }
-            }
-            half norm = max(xorOne[0][0] + xorOne[0][1], half(0.00006198883056640625));
-            reciprocalNorm = half(metal::fast::rsqrt(float(norm)));
+        if (part < 2) {
+          half partial[2];
+          _Pragma("clang loop unroll(full)")
+          for (uint e = 0; e < 2; ++e) {
+            const half v0 = tile[0].thread_elements()[e];
+            const half v1 = tile[1].thread_elements()[e];
+            const half v2 = tile[2].thread_elements()[e];
+            const half v3 = tile[3].thread_elements()[e];
+            half first = fma(v1, v1, v0 * v0);
+            half second = fma(v3, v3, v2 * v2);
+            partial[e] = first + second;
           }
-          if (!shuffleReciprocals) {
-            if (lane < 16) { R[lane] = reciprocalNorm; }
-          }
+          // Row positions p = (lane bit 3, lane bit 0): the xor sums are
+          // (p0 + p2) + (p1 + p3), the same value on all four lanes, swapped through
+          // this simdgroup's own value rows (written only after the norms).
+          threadgroup half2* partials = (threadgroup half2*)(V + simd * 8 * 32) + fragmentRow * 4;
+          partials[((lane >> 2) & 2) | (lane & 1)] = half2(partial[0], partial[1]);
           simdgroup_barrier(mem_flags::mem_threadgroup);
-          for (uint i = lane; i < 128; i += 32) {
-            const half tokenReciprocal = shuffleReciprocals
-              ? simd_shuffle(reciprocalNorm, i / 8) : R[i / 8];
-            half4 normalized = T4[i] * tokenReciprocal;
-            K4[(simd * 16 + i / 8) * 8 + i % 8] = half4(
-              half(float(mlxdlss_e4m3(normalized.x))), half(float(mlxdlss_e4m3(normalized.y))),
-              half(float(mlxdlss_e4m3(normalized.z))), half(float(mlxdlss_e4m3(normalized.w))));
+          const half2 p0 = partials[0];
+          const half2 p1 = partials[1];
+          const half2 p2 = partials[2];
+          const half2 p3 = partials[3];
+          simdgroup_barrier(mem_flags::mem_threadgroup);
+          half xorOne[2];
+          _Pragma("clang loop unroll(full)")
+          for (uint e = 0; e < 2; ++e) {
+            xorOne[e] = (p0[e] + p2[e]) + (p1[e] + p3[e]);
+          }
+          half norm = max(xorOne[0] + xorOne[1], half(0.00006198883056640625));
+          const half reciprocalNorm = half(metal::fast::rsqrt(float(norm)));
+          _Pragma("clang loop unroll(full)")
+          for (uint o = 0; o < 4; ++o) {
+            _Pragma("clang loop unroll(full)")
+            for (uint e = 0; e < 2; ++e) {
+              half normalized = tile[o].thread_elements()[e] * reciprocalNorm;
+              if (part == 0) { normalized *= scale; }
+              tile[o].thread_elements()[e] = half(float(mlxdlss_e4m3(normalized)));
+            }
           }
         } else {
-          for (uint i = lane; i < 128; i += 32) {
-            half4 value = T4[i];
-            V4[(simd * 16 + i / 8) * 8 + i % 8] = half4(
-              half(float(mlxdlss_e4m3(value.x))), half(float(mlxdlss_e4m3(value.y))),
-              half(float(mlxdlss_e4m3(value.z))), half(float(mlxdlss_e4m3(value.w))));
+          _Pragma("clang loop unroll(full)")
+          for (uint o = 0; o < 4; ++o) {
+            _Pragma("clang loop unroll(full)")
+            for (uint e = 0; e < 2; ++e) {
+              tile[o].thread_elements()[e] = half(float(mlxdlss_e4m3(tile[o].thread_elements()[e])));
+            }
           }
         }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-      }
-
-      // Queries of this simdgroup's 16 tokens: stage, normalise with the head
-      // scale (one lane per token for the norm), publish, load as tiles.
-      for (uint i = lane; i < 128; i += 32) {
-        const uint token = simd * 16 + i / 8;
-        const int y = rowY0 + int(token / 8);
-        const int x = colX0 + int(token % 8);
-        const bool in = y >= 0 && y < int(height) && x >= 0 && x < int(width);
-        T4[i] = in ? qkv4[((uint(y) * width + uint(x)) * rowStride + head * 32) / 4 + i % 8] : half4(0.0h);
-      }
-      simdgroup_barrier(mem_flags::mem_threadgroup);
-      half reciprocalNorm = 0.0h;
-      if (lane < 16) {
-        threadgroup half* vec = T + lane * 32;
-        half value[32];
-        for (uint c = 0; c < 32; ++c) { value[c] = vec[c]; }
-        half partial[4][2];
-        for (uint l = 0; l < 4; ++l) {
-          for (uint parity = 0; parity < 2; ++parity) {
-            uint c = l * 2 + parity;
-            half first = fma(value[c + 8], value[c + 8], value[c] * value[c]);
-            half second = fma(value[c + 24], value[c + 24], value[c + 16] * value[c + 16]);
-            partial[l][parity] = first + second;
+        _Pragma("clang loop unroll(full)")
+        for (uint o = 0; o < 4; ++o) {
+          if (part == 0) {
+            qt[o] = tile[o];
+          } else {
+            simdgroup_store(tile[o], (part == 1 ? K : V) + simd * 8 * 32 + o * 8, 32, ulong2(0), false);
           }
-        }
-        half xorTwo[4][2];
-        for (uint l = 0; l < 4; ++l) {
-          for (uint parity = 0; parity < 2; ++parity) {
-            xorTwo[l][parity] = partial[l][parity] + partial[l ^ 2][parity];
-          }
-        }
-        half xorOne[4][2];
-        for (uint l = 0; l < 4; ++l) {
-          for (uint parity = 0; parity < 2; ++parity) {
-            xorOne[l][parity] = xorTwo[l][parity] + xorTwo[l ^ 1][parity];
-          }
-        }
-        half norm = max(xorOne[0][0] + xorOne[0][1], half(0.00006198883056640625));
-        reciprocalNorm = half(metal::fast::rsqrt(float(norm)));
-      }
-      if (!shuffleReciprocals) {
-        if (lane < 16) { R[lane] = reciprocalNorm; }
-      }
-      simdgroup_barrier(mem_flags::mem_threadgroup);
-      for (uint i = lane; i < 128; i += 32) {
-        const half tokenReciprocal = shuffleReciprocals
-          ? simd_shuffle(reciprocalNorm, i / 8) : R[i / 8];
-        half4 normalized = T4[i] * tokenReciprocal;
-        normalized *= scale;
-        T4[i] = half4(
-          half(float(mlxdlss_e4m3(normalized.x))), half(float(mlxdlss_e4m3(normalized.y))),
-          half(float(mlxdlss_e4m3(normalized.z))), half(float(mlxdlss_e4m3(normalized.w))));
-      }
-      simdgroup_barrier(mem_flags::mem_threadgroup);
-      simdgroup_matrix<half, 8, 8> qt[2][4];
-      for (uint rr = 0; rr < 2; ++rr) {
-        for (uint k = 0; k < 4; ++k) {
-          simdgroup_load(qt[rr][k], T + rr * 256 + k * 8, 32, ulong2(0), false);
         }
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
 
-      // Per window row: scores (float accumulation), bias, bit-affine softmax
-      // with E4M3 probabilities, attended = E4M3(P · v), store.
-      for (uint rr = 0; rr < 2; ++rr) {
-        const uint token0 = (simd * 2 + rr) * 8;
-        threadgroup half* S = T;
-        for (uint j = 0; j < 8; ++j) {
-          simdgroup_matrix<float, 8, 8> acc;
-          acc.thread_elements()[0] = 0.0f;
-          acc.thread_elements()[1] = 0.0f;
-          for (uint k = 0; k < 4; ++k) {
-            simdgroup_matrix<half, 8, 8> rightHalf;
-            simdgroup_load(rightHalf, K + j * 8 * 32 + k * 8, 32, ulong2(0), true);
-            simdgroup_matrix<float, 8, 8> left;
-            simdgroup_matrix<float, 8, 8> right;
-            left.thread_elements()[0] = float(qt[rr][k].thread_elements()[0]);
-            left.thread_elements()[1] = float(qt[rr][k].thread_elements()[1]);
-            right.thread_elements()[0] = float(rightHalf.thread_elements()[0]);
-            right.thread_elements()[1] = float(rightHalf.thread_elements()[1]);
-            simdgroup_multiply_accumulate(acc, left, right, acc);
-          }
-          simdgroup_matrix<half, 8, 8> result;
-          result.thread_elements()[0] = half(acc.thread_elements()[0]);
-          result.thread_elements()[1] = half(acc.thread_elements()[1]);
-          simdgroup_store(result, S + j * 8, 64, ulong2(0), false);
+      // Scores (float accumulation), bias and the bit-affine softmax weights in
+      // the matmul epilogue, the sequential half total of each query row, E4M3
+      // probabilities in registers, attended = E4M3(P · v), store from the
+      // fragments.
+      threadgroup half* rowScratch = arena + 4096 + simd * 256;
+      const uint token0 = simd * 8;
+      simdgroup_matrix<half, 8, 8> weights[8];
+      _Pragma("clang loop unroll(full)")
+      for (uint j = 0; j < 8; ++j) {
+        simdgroup_matrix<float, 8, 8> acc;
+        acc.thread_elements()[0] = 0.0f;
+        acc.thread_elements()[1] = 0.0f;
+        _Pragma("clang loop unroll(full)")
+        for (uint k = 0; k < 4; ++k) {
+          simdgroup_matrix<half, 8, 8> right;
+          simdgroup_load(right, K + j * 8 * 32 + k * 8, 32, ulong2(0), true);
+          simdgroup_multiply_accumulate(acc, qt[k], right, acc);
+        }
+        half2 score = half2(half(acc.thread_elements()[0]), half(acc.thread_elements()[1]))
+          + attentionBias2[((head * 64 + token0 + fragmentRow) * 64 + j * 8 + fragmentColumn) / 2];
+        half2 affine = fma(score, half2(0.044921875h), half2(1.30078125h));
+        affine = clamp(affine, half2(1.03125h), half2(1.5693359375h));
+        // The vendor's (packed << 5) + 0x7FF88000 on the half pair: within the
+        // clamp range (bits 0x3C20..0x3E47) the low half always carries one into
+        // the high half and shifts 7 into it, so each half becomes
+        // (bits << 5) ^ 0x8000 on its own.
+        half2 weight = as_type<half2>(ushort2((as_type<ushort2>(affine) << 5) ^ ushort2(0x8000)));
+        weights[j].thread_elements()[0] = weight.x;
+        weights[j].thread_elements()[1] = weight.y;
+      }
+      // Every lane reads its query row back from the simdgroup's scratch, 32 keys
+      // at a time, and adds it up in key order.
+      half total = 0.0h;
+      _Pragma("clang loop unroll(full)")
+      for (uint pass = 0; pass < 2; ++pass) {
+        _Pragma("clang loop unroll(full)")
+        for (uint j = 0; j < 4; ++j) {
+          simdgroup_store(weights[pass * 4 + j], rowScratch + j * 8, 32, ulong2(0), false);
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint i = lane; i < 128; i += 32) {
-          T4[i] = T4[i] + attentionBias4[(head * 64 + token0 + i / 16) * 16 + i % 16];
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        half reciprocalTotal = 0.0h;
-        if (lane < 8) {
-          threadgroup half* row = S + lane * 64;
-          half total = 0.0h;
-          for (uint j = 0; j < 64; j += 2) {
-            half2 score = half2(row[j], row[j + 1]);
-            half2 affine = fma(score, half2(0.044921875h), half2(1.30078125h));
-            affine = clamp(affine, half2(1.03125h), half2(1.5693359375h));
-            ushort2 bits = as_type<ushort2>(affine);
-            uint packed = uint(bits.x) | (uint(bits.y) << 16);
-            uint transformed = (packed << 5) + 0x7FF88000;
-            half2 weight = as_type<half2>(ushort2(ushort(transformed), ushort(transformed >> 16)));
-            total += weight.x;
-            total += weight.y;
-          }
-          reciprocalTotal = half(1.0f / float(total));
-          if (!shuffleReciprocals) { R[lane] = reciprocalTotal; }
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint i = lane; i < 128; i += 32) {
-          const half reciprocal = shuffleReciprocals ? simd_shuffle(reciprocalTotal, i / 16) : R[i / 16];
-          half4 scores = T4[i];
-          half4 probabilities;
-          for (uint p = 0; p < 2; ++p) {
-            half2 score = p == 0 ? scores.xy : scores.zw;
-            half2 affine = fma(score, half2(0.044921875h), half2(1.30078125h));
-            affine = clamp(affine, half2(1.03125h), half2(1.5693359375h));
-            ushort2 bits = as_type<ushort2>(affine);
-            uint packed = uint(bits.x) | (uint(bits.y) << 16);
-            uint transformed = (packed << 5) + 0x7FF88000;
-            half2 weight = as_type<half2>(ushort2(ushort(transformed), ushort(transformed >> 16)));
-            half2 probability = half2(
-              half(float(mlxdlss_e4m3(weight.x * reciprocal))), half(float(mlxdlss_e4m3(weight.y * reciprocal))));
-            if (p == 0) { probabilities.xy = probability; } else { probabilities.zw = probability; }
-          }
-          T4[i] = probabilities;
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        simdgroup_matrix<half, 8, 8> at[4];
-        for (uint o = 0; o < 4; ++o) {
-          simdgroup_matrix<float, 8, 8> acc;
-          acc.thread_elements()[0] = 0.0f;
-          acc.thread_elements()[1] = 0.0f;
-          for (uint k = 0; k < 8; ++k) {
-            simdgroup_matrix<half, 8, 8> leftHalf;
-            simdgroup_matrix<half, 8, 8> rightHalf;
-            simdgroup_load(leftHalf, S + k * 8, 64, ulong2(0), false);
-            simdgroup_load(rightHalf, V + k * 8 * 32 + o * 8, 32, ulong2(0), false);
-            simdgroup_matrix<float, 8, 8> left;
-            simdgroup_matrix<float, 8, 8> right;
-            left.thread_elements()[0] = float(leftHalf.thread_elements()[0]);
-            left.thread_elements()[1] = float(leftHalf.thread_elements()[1]);
-            right.thread_elements()[0] = float(rightHalf.thread_elements()[0]);
-            right.thread_elements()[1] = float(rightHalf.thread_elements()[1]);
-            simdgroup_multiply_accumulate(acc, left, right, acc);
-          }
-          at[o].thread_elements()[0] = half(float(mlxdlss_e4m3(half(acc.thread_elements()[0]))));
-          at[o].thread_elements()[1] = half(float(mlxdlss_e4m3(half(acc.thread_elements()[1]))));
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint o = 0; o < 4; ++o) {
-          simdgroup_store(at[o], T + o * 8, 32, ulong2(0), false);
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        const int y = rowY0 + int(simd * 2 + rr);
-        for (uint i = lane; i < 64; i += 32) {
-          const int x = colX0 + int(i / 8);
-          if (y < 0 || y >= int(height) || x < 0 || x >= int(width)) { continue; }
-          output4[((uint(y) * width + uint(x)) * channels + head * 32) / 4 + i % 8] = T4[i];
+        const threadgroup half4* row4 = (const threadgroup half4*)(rowScratch + fragmentRow * 32);
+        _Pragma("clang loop unroll(full)")
+        for (uint i = 0; i < 8; ++i) {
+          const half4 w = row4[i];
+          total += w.x;
+          total += w.y;
+          total += w.z;
+          total += w.w;
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
       }
-      """#,
-    header: "#include <metal_simdgroup_matrix>\n" + NeuralRenderingTransformerOperations.e4m3MetalHeaderText
-  )
+      // The weights lie in [2^-14, 9.75] and the total is at least the largest of
+      // them, so the probabilities are non-negative and at most about 1; P · v
+      // stays within 64 * 1.125 * 448 and cannot be NaN.
+      const half reciprocal = half(1.0f / float(total));
+      _Pragma("clang loop unroll(full)")
+      for (uint j = 0; j < 8; ++j) {
+        _Pragma("clang loop unroll(full)")
+        for (uint e = 0; e < 2; ++e) {
+          half weight = weights[j].thread_elements()[e] * reciprocal;
+          weights[j].thread_elements()[e] = mlxdlss_e4m3_nonnegative(weight);
+        }
+      }
+      _Pragma("clang loop unroll(full)")
+      for (uint o = 0; o < 4; ++o) {
+        simdgroup_matrix<float, 8, 8> acc;
+        acc.thread_elements()[0] = 0.0f;
+        acc.thread_elements()[1] = 0.0f;
+        _Pragma("clang loop unroll(full)")
+        for (uint k = 0; k < 8; ++k) {
+          simdgroup_matrix<half, 8, 8> right;
+          simdgroup_load(right, V + k * 8 * 32 + o * 8, 32, ulong2(0), false);
+          simdgroup_multiply_accumulate(acc, weights[k], right, acc);
+        }
+        const half2 attended = half2(
+          mlxdlss_e4m3_no_nan(half(acc.thread_elements()[0])),
+          mlxdlss_e4m3_no_nan(half(acc.thread_elements()[1])));
+        if (inside) {
+          output2[(pixel * channels + head * 32 + o * 8 + fragmentColumn) / 2] = attended;
+        }
+      }
+      """#
 
   /// E4M3-published attended values `[1, H, W, channels]` for projected rows
   /// `qkv` of shape `[1, H, W, 3 * channels]` (half precision).
@@ -314,7 +260,9 @@ enum NeuralRenderingFusedWindowAttention {
     attentionScale: MLXArray,
     attentionBias: MLXArray,
     headCount: Int,
-    windowOrigin: NeuralRenderingWindowOrigin
+    windowOrigin: NeuralRenderingWindowOrigin,
+    kernel: MLXFast.MLXFastKernel? = nil,
+    simdgroupsPerWindow simdgroups: Int = simdgroupsPerWindow
   ) -> MLXArray {
     precondition(qkv.ndim == 4 && qkv.shape[0] == 1 && qkv.dtype == .float16)
     let channels = qkv.shape[3] / 3
@@ -330,7 +278,7 @@ enum NeuralRenderingFusedWindowAttention {
     let windowsX = (width + padLeft + windowSize - 1) / windowSize
     let threadgroups = windowsY * windowsX * headCount
     let params = NeuralRenderingKernelParameters.array([UInt32(height), UInt32(width), UInt32(padTop), UInt32(padLeft), UInt32(headCount)])
-    return kernel(
+    return (kernel ?? Self.kernel)(
       [
         qkv, attentionScale.asType(.float16), attentionBias.asType(.float16).reshaped([headCount * 64 * 64]),
         params,
@@ -342,8 +290,8 @@ enum NeuralRenderingFusedWindowAttention {
         ("constantAttentionScale", headCount < 8),
         ("shuffleReciprocals", NeuralRenderingFusedWindowBlock.shuffleReciprocals),
       ],
-      grid: (threadgroups * 32 * simdgroupsPerWindow, 1, 1),
-      threadGroup: (32 * simdgroupsPerWindow, 1, 1),
+      grid: (threadgroups * 32 * simdgroups, 1, 1),
+      threadGroup: (32 * simdgroups, 1, 1),
       outputShapes: [[1, height, width, channels]],
       outputDTypes: [.float16]
     )[0]

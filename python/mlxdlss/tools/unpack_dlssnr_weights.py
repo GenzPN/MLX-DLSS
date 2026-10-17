@@ -21,26 +21,72 @@ import tempfile
 import numpy
 from safetensors.numpy import safe_open, save_file
 
+try:
+    from .. import topology as _topology
+except ImportError:  # loaded as a top-level module (Tools/ shim on sys.path)
+    from mlxdlss import topology as _topology
 
+
+PACKED_FORMATS = {
+    "dlssnr-WEIGHTS_HT-packed-u8-v2",
+    "dlssnr-WEIGHTS_CC_SMALL_FP8-packed-u8-v2",
+}
 PACKED_FORMAT = "dlssnr-WEIGHTS_HT-packed-u8-v2"
 LOGICAL_FORMAT = "dlssnr-logical-v18"
 
 _TENSOR_NAME = re.compile(r"^block(?P<block>\d+)\.layer(?P<layer>\d+)\.layer$")
+_BLEND_SCALE_NAME = re.compile(r"^block(?P<block>\d+)\.layer0\.blend_scale$")
 
-_STANDARD_BLOCK_CONTRACTS = {
-    **{block: (32, 128, 1) for block in (*range(0, 5), *range(66, 71))},
-    **{block: (64, 224, 2) for block in (*range(5, 9), *range(62, 66))},
-    **{block: (128, 384, 4) for block in (*range(9, 15), *range(56, 62))},
-    **{block: (256, 704, 8) for block in (*range(15, 23), *range(48, 56))},
-}
-_DOWNSAMPLE_BLOCKS = {4, 8, 14, 22}
-_UPSAMPLE_BLOCKS = {48, 56, 62, 66}
 _STANDARD_PAYLOAD_SIZES = {
     32: {"regular": 0x50C0, "down": 0x58C0, "up": 0x5900},
     64: {"regular": 0xF140, "down": 0x11130, "up": 0x111A0},
     128: {"regular": 0x30240, "down": 0x38230, "up": 0x38320},
     256: {"regular": 0xA8450, "down": 0xC8440, "up": 0xC8630},
 }
+_PRE_PAYLOAD_SIZE = 0x54C0
+_POST_PAYLOAD_SIZE = 0x5530
+_STANDARD_FAMILY_BY_SIZE = {
+    size: ({"regular": "window", "down": "downsample", "up": "upsample"}[kind], channels)
+    for channels, sizes in _STANDARD_PAYLOAD_SIZES.items()
+    for kind, size in sizes.items()
+}
+_SPLIT_FFN_BYTES = 2 * 512 * 512
+_GLOBAL_EXPAND_BYTES = 1024 * 4096 + 16
+_BRIDGE_BYTES = 1024 * 512 + 512 * 2
+
+
+def packed_block_family(layer_sizes: dict[int, int], block: int) -> tuple[str, int] | None:
+    """``(family, channels)`` of one packed block from its ``layerN.layer`` byte counts."""
+    first = layer_sizes.get(0)
+    if first is None:
+        return None
+    if first == _SPLIT_FFN_BYTES and set(layer_sizes) >= {0, 1, 2, 3}:
+        return ("split_transition" if 4 in layer_sizes else "split", 512)
+    if first == _GLOBAL_EXPAND_BYTES and len(layer_sizes) == 5:
+        return ("global", 1024)
+    if first == _BRIDGE_BYTES and len(layer_sizes) == 1:
+        return ("bridge", 1024)
+    if len(layer_sizes) != 1:
+        return None
+    if first == _PRE_PAYLOAD_SIZE and block == 0:
+        return ("pre", 32)
+    if first == _POST_PAYLOAD_SIZE:
+        return ("post", 32)
+    return _STANDARD_FAMILY_BY_SIZE.get(first)
+
+
+def infer_packed_topology(sizes: dict[str, int]) -> "_topology.Topology":
+    """Topology of a packed weight map (``tensor name -> byte count``)."""
+    layers: dict[int, dict[int, int]] = {}
+    for name, size in sizes.items():
+        if (match := _TENSOR_NAME.fullmatch(name)) is not None:
+            layers.setdefault(int(match.group("block")), {})[int(match.group("layer"))] = size
+    if not layers:
+        raise ValueError("packed weights contain no blockN.layerM.layer tensors")
+    count = max(layers) + 1
+    return _topology.infer_from_families(
+        [packed_block_family(layers.get(block, {}), block) for block in range(count)]
+    )
 
 _QMMA_LOGICAL_ROW_SOURCE_16 = numpy.array(
     [0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15],
@@ -340,22 +386,18 @@ def _unpack_standard_swin(
     name: str,
     raw: numpy.ndarray,
     *,
-    block: int,
+    role: "_topology.Block",
     prefix: str,
 ) -> dict[str, numpy.ndarray]:
-    channels, hidden_features, heads = _STANDARD_BLOCK_CONTRACTS[block]
-    kind = (
-        "down"
-        if block in _DOWNSAMPLE_BLOCKS
-        else "up"
-        if block in _UPSAMPLE_BLOCKS
-        else "regular"
-    )
+    channels, hidden_features, heads = role.channels, role.hidden, role.heads
+    kind = {"downsample": "down", "upsample": "up"}.get(role.family, "regular")
+    pre = role.family == "pre"
+    post = role.family == "post"
 
-    if block == 0:
-        _require_size(name, raw, 0x54C0)
-    elif block == 70:
-        _require_size(name, raw, 0x5530)
+    if pre:
+        _require_size(name, raw, _PRE_PAYLOAD_SIZE)
+    elif post:
+        _require_size(name, raw, _POST_PAYLOAD_SIZE)
     else:
         _require_size(name, raw, _STANDARD_PAYLOAD_SIZES[channels][kind])
 
@@ -440,7 +482,7 @@ def _unpack_standard_swin(
     if kind != "up" or channels == 32:
         _require_zero(name, raw, offset, offset + 16)
         offset += 16
-    if block == 0:
+    if pre:
         adapter_bytes = 16 * channels * 2
         tensors[f"{prefix}.input_adapter_weight"] = unpack_hmma_f16_matrix(
             raw[offset : offset + adapter_bytes],
@@ -456,7 +498,7 @@ def _unpack_standard_swin(
         tensors[f"{prefix}.ffn_cos_skip"] = _f16(raw, offset, channels)
         offset += channels * 2
 
-    if block == 0:
+    if pre:
         pass
     elif kind == "up":
         if channels == 32:
@@ -464,7 +506,7 @@ def _unpack_standard_swin(
             offset += 16
         tensors[f"{prefix}.sin"] = _f16(raw, offset, channels)
         offset += channels * 2
-    elif block == 70:
+    elif post:
         rotation = _f16(raw, offset, 2 * channels)
         tensors[f"{prefix}.inp_merge_sin"] = rotation[:channels].copy()
         tensors[f"{prefix}.inp_merge_cos"] = rotation[channels:].copy()
@@ -520,7 +562,7 @@ def _unpack_standard_swin(
         if offset != raw.size:
             _require_zero(name, raw, offset, raw.size)
             offset = raw.size
-    elif block == 70:
+    elif post:
         _require_zero(name, raw, offset, offset + 16)
         offset += 16
         for tensor_name in ("out_gain", "out_conv_weight"):
@@ -545,9 +587,15 @@ def _unpack_standard_swin(
     return tensors
 
 
-def unpack_known_tensor(name: str, payload: numpy.ndarray) -> dict[str, numpy.ndarray]:
+def unpack_known_tensor(
+    name: str,
+    payload: numpy.ndarray,
+    topology: "_topology.Topology" = _topology.HT,
+) -> dict[str, numpy.ndarray]:
     """Decode one proven packed tensor family or return an empty mapping."""
-    if name == "block70.layer0.blend_scale":
+    if (match := _BLEND_SCALE_NAME.fullmatch(name)) is not None:
+        if int(match.group("block")) != topology.post:
+            return {}
         raw = _payload_bytes(payload)
         _require_size(name, raw, 2)
         return {name: _f16(raw, 0, 1)}
@@ -557,13 +605,16 @@ def unpack_known_tensor(name: str, payload: numpy.ndarray) -> dict[str, numpy.nd
         return {}
     block = int(match.group("block"))
     layer = int(match.group("layer"))
+    if block >= topology.block_count:
+        return {}
+    role = topology.block(block)
     raw = _payload_bytes(payload)
     prefix = f"block{block}.layer{layer}"
 
-    if layer == 0 and block in _STANDARD_BLOCK_CONTRACTS:
-        return _unpack_standard_swin(name, raw, block=block, prefix=prefix)
+    if layer == 0 and role.family in {"pre", "window", "downsample", "upsample", "post"}:
+        return _unpack_standard_swin(name, raw, role=role, prefix=prefix)
 
-    if block in {*range(23, 31), *range(40, 48)}:
+    if role.family in {"split", "split_transition"}:
         if layer == 0:
             matrix_bytes = 512 * 512
             _require_size(name, raw, matrix_bytes * 2)
@@ -606,7 +657,7 @@ def unpack_known_tensor(name: str, payload: numpy.ndarray) -> dict[str, numpy.nd
                 ),
                 f"{prefix}.attn_cos_skip": _f16(raw, matrix_bytes, 512),
             }
-        if block == 30 and layer == 4:
+        if role.family == "split_transition" and layer == 4:
             matrix_bytes = 512 * 1024
             _require_size(name, raw, matrix_bytes + 16)
             if numpy.any(raw[matrix_bytes:]):
@@ -617,7 +668,7 @@ def unpack_known_tensor(name: str, payload: numpy.ndarray) -> dict[str, numpy.nd
                 )
             }
 
-    if 31 <= block <= 38:
+    if role.family == "global":
         if layer == 0:
             matrix_bytes = 1024 * 4096
             _require_size(name, raw, matrix_bytes + 16)
@@ -667,7 +718,7 @@ def unpack_known_tensor(name: str, payload: numpy.ndarray) -> dict[str, numpy.nd
                 f"{prefix}.attn_cos_skip": _f16(raw, matrix_bytes, 1024),
             }
 
-    if block == 39 and layer == 0:
+    if role.family == "bridge" and layer == 0:
         matrix_bytes = 1024 * 512
         _require_size(name, raw, matrix_bytes + 512 * 2)
         return {
@@ -717,11 +768,14 @@ def convert(source: pathlib.Path, destination: pathlib.Path) -> dict[str, object
     unsupported: list[str] = []
     with safe_open(source, framework="numpy") as handle:
         metadata = handle.metadata() or {}
-        if metadata.get("format") != PACKED_FORMAT:
-            raise ValueError(f"source format must be {PACKED_FORMAT}")
+        if metadata.get("format") not in PACKED_FORMATS:
+            raise ValueError(f"source format must be one of {sorted(PACKED_FORMATS)}")
         source_names = list(handle.keys())
+        topology = infer_packed_topology(
+            {name: int(handle.get_slice(name).get_shape()[0]) for name in source_names}
+        )
         for name in source_names:
-            tensors = unpack_known_tensor(name, handle.get_tensor(name))
+            tensors = unpack_known_tensor(name, handle.get_tensor(name), topology)
             if tensors:
                 overlap = set(decoded).intersection(tensors)
                 if overlap:
@@ -738,6 +792,8 @@ def convert(source: pathlib.Path, destination: pathlib.Path) -> dict[str, object
 
     output_metadata = {
         "format": LOGICAL_FORMAT,
+        "topology": topology.spec,
+        "source_format": str(metadata.get("format")),
         "source_sha256": _sha256(source),
         "source_tensor_count": str(len(source_names)),
         "decoded_source_tensor_count": str(len(source_names) - len(unsupported)),
@@ -766,6 +822,8 @@ def convert(source: pathlib.Path, destination: pathlib.Path) -> dict[str, object
     return {
         "schemaVersion": 1,
         "format": LOGICAL_FORMAT,
+        "topology": topology.spec,
+        "blockCount": topology.block_count,
         "destination": str(destination),
         "sourceTensorCount": len(source_names),
         "decodedSourceTensorCount": len(source_names) - len(unsupported),

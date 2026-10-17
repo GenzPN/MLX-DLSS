@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Extract the embedded DLSSNR WEIGHTS_HT resource as packed safetensors.
+"""Extract an embedded DLSSNR weight resource as packed safetensors.
+
+``nvngx_dlssnr.dll`` 310.8.0 carries one network (``WEIGHTS_HT``); 310.9.16 adds
+the smaller ``WEIGHTS_CC_SMALL_FP8`` network (its shipping default preset) next
+to it. Both use the same serialized weight map.
 
 The NVIDIA DLL is always supplied by the user and is never copied into the
 repository. Tensor names, serialized metadata, and payload bytes are preserved
@@ -25,7 +29,14 @@ from safetensors.numpy import save_file
 
 
 RESOURCE_NAME = "WEIGHTS_HT"
+SMALL_RESOURCE_NAME = "WEIGHTS_CC_SMALL_FP8"
+# Known network resources, newest shipping default first.
+RESOURCE_NAMES = (SMALL_RESOURCE_NAME, RESOURCE_NAME)
 FORMAT_NAME = "dlssnr-WEIGHTS_HT-packed-u8-v2"
+
+
+def format_name(resource_name: str) -> str:
+    return f"dlssnr-{resource_name}-packed-u8-v2"
 _RESOURCE_TYPE_RCDATA = 10
 _PACKED_TENSOR_DTYPE_CODE = 1
 _PACKED_TENSOR_ELEMENT_BYTES = 2
@@ -139,7 +150,14 @@ def _rva_to_file_offset(
     raise ValueError(f"{context} RVA is outside PE file-backed sections")
 
 
-def extract_pe_resource(data: bytes, name: str = RESOURCE_NAME) -> bytes:
+def list_rcdata_resources(data: bytes) -> list[str]:
+    """Names of the RCDATA resources of a PE image (``WEIGHTS_*`` blobs among them)."""
+    names: list[str] = []
+    extract_pe_resource(data, None, _names=names)
+    return names
+
+
+def extract_pe_resource(data: bytes, name: str | None = RESOURCE_NAME, *, _names: list[str] | None = None) -> bytes:
     resource_rva, resource_size, sections = _pe_sections(data)
     resource_offset = _rva_to_file_offset(
         sections, resource_rva, resource_size, "resource directory"
@@ -190,6 +208,12 @@ def extract_pe_resource(data: bytes, name: str = RESOURCE_NAME) -> bytes:
     if type_directory is None:
         raise ValueError("PE image has no RCDATA resource type")
 
+    if _names is not None:
+        _names.extend(
+            label for identifier, _ in entries(type_directory)
+            if (label := resource_name(identifier)) is not None
+        )
+        return b""
     language_directory: int | None = None
     for identifier, target in entries(type_directory):
         if resource_name(identifier) == name:
@@ -327,6 +351,7 @@ def _write_safetensors(
     source_sha256: str,
     resource_sha256: str,
     source_kind: str,
+    resource_name: str = RESOURCE_NAME,
 ) -> None:
     destination = pathlib.Path(destination)
     if destination.exists() or destination.is_symlink():
@@ -340,7 +365,8 @@ def _write_safetensors(
         name: tensor.metadata() for name, tensor in sorted(tensors.items())
     }
     metadata = {
-        "format": FORMAT_NAME,
+        "format": format_name(resource_name),
+        "resource_name": resource_name,
         "source_kind": source_kind,
         "source_sha256": source_sha256,
         "resource_sha256": resource_sha256,
@@ -378,10 +404,12 @@ def _summary(
     *,
     source_sha256: str,
     resource_sha256: str,
+    resource_name: str = RESOURCE_NAME,
 ) -> dict[str, object]:
     return {
         "schemaVersion": 1,
-        "format": FORMAT_NAME,
+        "format": format_name(resource_name),
+        "resourceName": resource_name,
         "destination": str(destination),
         "sourceSHA256": source_sha256,
         "resourceSHA256": resource_sha256,
@@ -397,7 +425,9 @@ def _summary(
 
 
 def extract_resource_blob(
-    blob_path: pathlib.Path, destination: pathlib.Path
+    blob_path: pathlib.Path,
+    destination: pathlib.Path,
+    resource_name: str = RESOURCE_NAME,
 ) -> dict[str, object]:
     blob_path = pathlib.Path(blob_path)
     destination = pathlib.Path(destination)
@@ -409,13 +439,15 @@ def extract_resource_blob(
         destination,
         source_sha256=digest,
         resource_sha256=digest,
-        source_kind="WEIGHTS_HT-resource-blob",
+        source_kind=f"{resource_name}-resource-blob",
+        resource_name=resource_name,
     )
     return _summary(
         tensors,
         destination,
         source_sha256=digest,
         resource_sha256=digest,
+        resource_name=resource_name,
     )
 
 
@@ -439,12 +471,16 @@ def pe_file_version(data: bytes) -> str | None:
     return text or None
 
 
-def extract_dll(dll_path: pathlib.Path, destination: pathlib.Path) -> dict[str, object]:
+def extract_dll(
+    dll_path: pathlib.Path,
+    destination: pathlib.Path,
+    resource_name: str = RESOURCE_NAME,
+) -> dict[str, object]:
     dll_path = pathlib.Path(dll_path)
     destination = pathlib.Path(destination)
     dll = dll_path.read_bytes()
     file_version = pe_file_version(dll)
-    resource = extract_pe_resource(dll)
+    resource = extract_pe_resource(dll, resource_name)
     tensors = parse_weight_map(resource)
     dll_digest = _sha256(dll)
     resource_digest = _sha256(resource)
@@ -454,33 +490,40 @@ def extract_dll(dll_path: pathlib.Path, destination: pathlib.Path) -> dict[str, 
         source_sha256=dll_digest,
         resource_sha256=resource_digest,
         source_kind="nvngx_dlssnr.dll",
+        resource_name=resource_name,
     )
     summary = _summary(
         tensors,
         destination,
         source_sha256=dll_digest,
         resource_sha256=resource_digest,
+        resource_name=resource_name,
     )
     summary["fileVersion"] = file_version
     return summary
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Extract an external nvngx_dlssnr.dll WEIGHTS_HT resource to safetensors."
+        description="Extract an external nvngx_dlssnr.dll weight resource to safetensors."
     )
     parser.add_argument("source", type=pathlib.Path)
     parser.add_argument("destination", type=pathlib.Path)
     parser.add_argument(
+        "--resource",
+        default=RESOURCE_NAME,
+        help=f"RCDATA resource to extract ({', '.join(RESOURCE_NAMES)}; default {RESOURCE_NAME})",
+    )
+    parser.add_argument(
         "--resource-blob",
         action="store_true",
-        help="treat source as an already extracted WEIGHTS_HT resource",
+        help="treat source as an already extracted resource of that name",
     )
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     summary = (
-        extract_resource_blob(arguments.source, arguments.destination)
+        extract_resource_blob(arguments.source, arguments.destination, arguments.resource)
         if arguments.resource_blob
-        else extract_dll(arguments.source, arguments.destination)
+        else extract_dll(arguments.source, arguments.destination, arguments.resource)
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

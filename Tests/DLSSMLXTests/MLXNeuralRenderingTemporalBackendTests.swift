@@ -268,6 +268,74 @@ final class MLXNeuralRenderingTemporalBackendTests: XCTestCase {
     )
   }
 
+  /// The padded extent's features in one kernel equal the logical features
+  /// gathered onto the extent with the noise channels of the network pixels,
+  /// and the postprocessor reads the logical corner of the padded head output
+  /// and features exactly like their crops.
+  func testExtendedFeatureKernelsMatchTheGatheredLogicalFeatures() throws {
+    let (width, height) = (330, 341)
+    let geometry = try NeuralRenderingNetworkGeometryPolicy.vendorAligned.resolve(outputWidth: width, outputHeight: height)
+    XCTAssertFalse(geometry.isIdentity)
+    let indices = NeuralRenderingExtensionIndices(geometry)
+    MLXRandom.seed(17)
+    let color = MLXRandom.uniform(low: -0.1, high: 1.1, [1, height, width, 3])
+    let mask = MLXRandom.uniform(low: 0, high: 1, [1, height, width, 3])
+    let history = MLXRandom.uniform(low: 0, high: 1, [1, height, width, 3])
+    let motion = MLXRandom.uniform(low: -0.02, high: 0.02, [1, height, width, 2])
+    let depth = MLXRandom.uniform(low: 0, high: 1, [1, height, width, 1])
+    let confidence = which(
+      MLXRandom.uniform(low: 0, high: 1, [1, height, width, 1]) .< 0.3, MLXArray(Float(0)),
+      minimum(MLXRandom.uniform(low: 0, high: 1.6, [1, height, width, 1]), MLXArray(Float(1))))
+    let base = MLXFirstFrameFeatureProcessor()
+    let temporal = MLXTemporalFeatureProcessor()
+    func gathered(_ array: MLXArray) -> MLXArray {
+      array.take(indices.rows, axis: 1).take(indices.columns, axis: 2)
+    }
+    func bits(_ array: MLXArray) -> [UInt32] { array.asType(.float32).view(dtype: .uint32).asArray(UInt32.self) }
+    let transform = try NeuralRenderingTextureTransform(
+      baseX: 3, baseY: 2, extentWidth: width - 7, extentHeight: height - 5, resourceWidth: width, resourceHeight: height)
+    for (controlMask, controls, historyTransform) in [
+      (nil, NeuralRenderingFeatureControls(), nil),
+      (mask, NeuralRenderingFeatureControls(normalizedStyle: 0.5, localToneStrength: 0.25, localStructureStrength: 0.75), transform),
+      (nil, NeuralRenderingFeatureControls(
+        localStructureStrength: 0.5,
+        automaticMask: NeuralRenderingAutomaticMaskConfiguration(skinStructureStrength: -1, automaticMaskStructureStrength: 0.125)),
+       nil),
+    ] as [(MLXArray?, NeuralRenderingFeatureControls, NeuralRenderingTextureTransform?)] {
+      let networkBase = base(
+        color: gathered(color), controlMask: controlMask.map(gathered), noiseFrameIndex: 5, featureControls: controls)
+      let extendedBase = base(color: color, controlMask: controlMask, noiseFrameIndex: 5, featureControls: controls,
+        extension: indices)
+      XCTAssertEqual(bits(extendedBase), bits(networkBase), "first frame")
+
+      for historyConfidence in [nil, confidence] {
+        let logical = temporal(
+          baseFeatures: networkBase[0..., 0..<height, 0..<width, 0...], history: history,
+          historyTransform: historyTransform, motion: motion, depth: depth, depthInverted: false,
+          historyConfidence: historyConfidence, featureControls: controls)
+        let reference = concatenated(
+          [networkBase[0..., 0..., 0..., 0..<3], gathered(logical)[0..., 0..., 0..., 3...]], axis: -1)
+        let extended = temporal(
+          color: color, controlMask: controlMask, noiseFrameIndex: 5, history: history,
+          historyTransform: historyTransform, motion: motion, depth: depth, depthInverted: false,
+          historyConfidence: historyConfidence, featureControls: controls, extension: indices)
+        XCTAssertEqual(bits(extended), bits(reference), "history, confidence \(historyConfidence != nil)")
+
+        let postprocessor = MLXTemporalPostprocessor()
+        let head = MLXRandom.normal([1, geometry.networkHeight, geometry.networkWidth, 4]).asType(.float16)
+        for intensity in [Float(1), 0.6] {
+          let cropped = postprocessor(
+            head: head[0..., 0..<height, 0..<width, 0...], currentColor: color, features: logical, hasHistory: true,
+            historyConfidence: historyConfidence, controlMask: controlMask, intensity: intensity)
+          let padded = postprocessor(
+            head: head, currentColor: color, features: extended, hasHistory: true,
+            historyConfidence: historyConfidence, controlMask: controlMask, intensity: intensity)
+          XCTAssertEqual(bits(padded), bits(cropped), "postprocessor, intensity \(intensity)")
+        }
+      }
+    }
+  }
+
   func testFusedDeviceFeatureKernelMatchesSequentialDeviceKernels() throws {
     let current = try smallTensor(
       name: "color", channels: 3, width: 2, height: 2,
@@ -778,8 +846,10 @@ final class MLXNeuralRenderingTemporalBackendTests: XCTestCase {
         automaticMaskStructureStrength: 0.125
       )
     )
+    let renderer = try MLXNeuralRenderer(packageURL: packageURL)
     let reference = NeuralRenderingTemporalReferenceBackend(
-      backend: try MLXNeuralRenderer(packageURL: packageURL),
+      backend: renderer,
+      blendScale: renderer.blendScale ?? MLXTemporalPostprocessor.defaultBlendScale,
       temporalPreprocessor: NeuralRenderingCPUTemporalFeaturePreprocessor(
         depthGuideMode: .observedZeroDescriptor,
         historyTransform: historyTransform,
@@ -820,8 +890,10 @@ final class MLXNeuralRenderingTemporalBackendTests: XCTestCase {
       throw XCTSkip("set MLXDLSS_NEURAL_RENDERING_PACKAGE to run the device pipeline probe")
     }
     let packageURL = URL(fileURLWithPath: packagePath)
+    let renderer = try MLXNeuralRenderer(packageURL: packageURL)
     let reference = NeuralRenderingTemporalReferenceBackend(
-      backend: try MLXNeuralRenderer(packageURL: packageURL),
+      backend: renderer,
+      blendScale: renderer.blendScale ?? MLXTemporalPostprocessor.defaultBlendScale,
       controlMaskIntensity: 0.8
     )
     let device = try MLXNeuralRenderingDeviceTemporalBackend(

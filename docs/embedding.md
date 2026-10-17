@@ -195,6 +195,185 @@ M2 Max, 38-core GPU, real weights. Processing scale increases network pixel
 count quadratically. Compare complete frame loops at the same scale and output
 format; warm kernel timings exclude media I/O and startup.
 
+### 1080p, HT and small networks (2026-10-17)
+
+Network alone, warm, best of five (`PerfSpikeKernelTimingTests.testWholeFrame`):
+
+| Network extent | HT at `0ca2dea` | HT now | Small now |
+| --- | --- | --- | --- |
+| 768×1024 | 70.8 ms | 52.6 ms | 27.5 ms |
+| 1088×1920 | 173.8 ms | 134.0 ms | 72.8 ms |
+
+`mlxdlss process-video` over 60 frames of a 1920×1080 H.264 clip, temporal,
+automatic motion, no audio, whole command after a warm-up run. The runs
+alternated between the two builds:
+
+| Build | HT | Small |
+| --- | --- | --- |
+| `0ca2dea` | 12.18–12.19 s | not supported |
+| now | 9.59–9.69 s | 5.91–6.05 s |
+
+Peak footprint fell from 5.7–5.8 GB to 3.9 GB for HT; small takes 2.6 GB.
+Later runs of the current build on the same day were 23–30% slower while
+another process kept the GPU 92% busy; compare only runs taken together.
+
+Every change reproduces the previous output bit for bit. With `--motion zero`
+both builds write the same video (SHA-256 of the decoded RGB). With automatic
+motion, VideoToolbox optical flow can differ between runs of the same build,
+and the recurrent history carries such a difference into later frames.
+
+The changes, each with a diagnostics switch:
+
+- The multi-head window attention keeps one window row per simdgroup in
+  registers and only the keys and values in threadgroup memory.
+- The multi-head blocks' branched feed-forward with its published residual is
+  one kernel at 64 and 128 channels (`MLXDLSS_FUSED_FFN=0`,
+  `MLXDLSS_FUSED_FFN_CHANNELS`); at 256 channels the GEMM chain stays faster.
+- The 64-channel attention block (QKV, attention, projection, residual) is one
+  kernel (`MLXDLSS_FUSED_ATTENTION_BLOCK=0`,
+  `MLXDLSS_FUSED_ATTENTION_BLOCK_CHANNELS`).
+- The single-head kernel absorbs its neighbours: the stem adapter and 2×2 pool,
+  the downsample pool, the upsample merge, and the post block's merge and
+  output head (`MLXDLSS_FUSED_1H_GLUE=0`).
+- Frames whose extent is not a multiple of 64, such as 1080p, build their
+  features on the padded network extent in one kernel instead of gathering
+  logical features onto it: 82.8 → 75.7 ms per small-network 1080p frame
+  (`MLXDLSS_NR_EXTENDED_FEATURES=0`).
+
+The 1088×1920 small network spent 26 ms in the two full-resolution
+single-head blocks (stem and post), 18 ms in the global stage, whose GEMMs run
+at 5.6 TMAC/s against MLX's 6.1 TMAC/s peak on this GPU, and the rest in 26
+blocks of 1.3–3.4 ms (`NeuralRenderingBlockTimingTests`).
+
+### Window kernels without lane shuffles (2026-10-17, later)
+
+The window kernels sum each softmax row in the recovered sequential order.
+The four lanes that hold a row used to pass its 64 weights around with 32
+`simd_shuffle` calls, and those shuffles took about 12% of the single-head
+kernel. Each simdgroup now stores its weight tiles in 512 bytes of
+threadgroup scratch and every lane reads its row back, 32 keys at a time. The
+per-token norm partials go through the simdgroup's own value rows the same
+way. Threadgroup memory per window grows from 8 KB to 12 KB. Three smaller
+changes ride along:
+
+- The half path of E4M3 rounding clamps the magnitude at 448 and rounds it
+  with one magic-number add whose exponent follows the input (11 integer and
+  half operations instead of about 16). Probabilities, which are non-negative
+  and below 448, and attended values, which cannot be NaN, use shorter forms.
+  `PerfSpikeKernelTimingTests.testFastE4M3IsBitExactOnGPU` checks every half
+  value against the float path.
+- The bit-affine softmax transform works on each half on its own: within the
+  clamp range, `(packed << 5) + 0x7FF88000` equals `(bits << 5) ^ 0x8000` per
+  half.
+- The stem kernel pools the window from threadgroup memory instead of lane
+  shuffles.
+
+Kernel timings in one process, alternating rounds against the earlier
+sources, minimum at 1088×1920 unless noted (`NeuralRenderingKernelVariantTests`):
+
+| Kernel | Before | After |
+| --- | --- | --- |
+| Single-head block | 10.07 ms | 8.81 ms |
+| Stem: adapter, block 0, pool | 10.63 ms | 9.11 ms |
+| Post: merge, block, head | 10.38 ms | 8.97 ms |
+| Attention core, 2 heads, 272×480 | 0.74 ms | 0.55 ms |
+| Attention core, 8 heads, 68×120 | 0.32 ms | 0.27 ms |
+
+The whole network (`PerfSpikeKernelTimingTests.testWholeFrame`, best of five
+per run, four alternating runs of each build) went from 81.7–83.9 ms to
+75.6–78.0 ms for small and from 151.0–156.0 ms to 139.5–142.0 ms for HT at
+1088×1920. A browser and the window server kept the GPU 10–60% busy during
+these runs, so their absolute times sit above the table above; compare only
+within each pair.
+
+All outputs stay bit-identical: the stem and post kernels at every window
+phase against the earlier sources, the single-head block and attention core
+likewise, and whole frames of both networks at 384×384, 768×1024 and
+1088×1920 by SHA-256 of the output.
+
+Tried on the single-head kernel without a gain (same measurement, changes
+within noise unless noted):
+
+- Feed-forward weight tiles read as vector loads in fragment order, or
+  prefetched one hidden tile ahead: no change, or up to 19% slower with full
+  unrolling.
+- Feed-forward weights staged in threadgroup memory: 5–10% slower.
+- Two window rows per simdgroup (`MLXDLSS_1H_ROWS=2`): 16–23% slower.
+- Rolled hidden-tile loops: 5–11% slower.
+- More threadgroup memory per window costs occupancy: 24 KB is 2–9% slower
+  and 32 KB 14% slower than 16 KB; 8 KB with one more barrier showed no
+  difference against 12 KB.
+
+The feed-forward half of the kernel (128 of its 256 simdgroup MMAs per window
+row) and the E4M3 roundings remain the main costs.
+
+### Global stage (2026-10-17, later)
+
+The eight `vit_1d` global blocks (1024 channels, 32 heads of 32) see 640
+tokens at 1088×1920 and 192 at 768×1024. Two changes:
+
+- One kernel publishes the QKV projection: cosine queries with the head
+  scale, cosine keys and E4M3 values, written straight into the attention
+  kernel's layouts. It replaces three publishes over transposed heads, their
+  copies and the padding. The attention kernel writes its rows in token order,
+  so the transpose back is gone, and the attention residual publishes in the
+  same pass instead of a separate E4M3 round trip.
+- The resident attention kernel reads keys and values lane-major: a lane
+  fetches its fragment pairs for four 8-token tiles (for keys, the four
+  8-channel chunks of a tile) with two 8-byte loads instead of one
+  `simdgroup_load` per fragment. Eight simdgroups score whole 32-token groups
+  with four independent accumulators and turn the scores into vendor weights
+  in registers; one lane per row sums the weights in key order, 32 per batch of
+  loads; four simdgroups run the value chains. Half operands feed the float
+  accumulators directly, which is bit-identical to converting them first.
+
+In one process, alternating rounds, quiet GPU:
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| Attention kernel and transpose back, 640 tokens | 0.50 ms | 0.27 ms |
+| Same, 192 tokens | 0.081 ms | 0.068 ms |
+| Same, 1024 tokens | 1.52 ms | 0.73 ms |
+| Eight blocks, 640 tokens, median | 22.45 ms | 19.76 ms |
+| Eight blocks, 192 tokens, median | 9.85 ms | 9.47 ms |
+
+The block rows come from `NeuralRenderingGlobalBlockABTests`
+(`MLXDLSS_GLOBAL_BLOCK_AB=1`), which times the block against the previous
+pipeline with the previous kernel source. The whole network
+(`PerfSpikeKernelTimingTests.testWholeFrame`, best of five per run, four
+alternating runs of each build):
+
+| Network extent | Small before | Small after | HT before | HT after |
+| --- | --- | --- | --- | --- |
+| 768×1024 | 25.3–26.4 ms | 24.7–25.5 ms | 49.7–55.0 ms | 48.3–53.4 ms |
+| 1088×1920 | 66.8–67.6 ms | 64.6–65.6 ms | 122.0–138.3 ms | 119.8–127.6 ms |
+
+Outputs stay bit-identical. The resident kernel equals the materialized
+attention at 2–1024 tokens (`testGlobalAttentionV2IsBitExactAndTiming`), the
+block equals the previous pipeline at 2–1024 tokens
+(`NeuralRenderingGlobalBlockABTests`), and whole frames of both networks at
+384×384, 768×1024 and 1088×1920 keep their SHA-256 for two inputs each.
+`MLXDLSS_GLOBAL_ATTENTION_V2=0` restores the earlier kernels and the separate
+publishes.
+
+Tried without a gain:
+
+- 16 query rows per threadgroup: 13–25% slower; the doubled threadgroup
+  memory costs more occupancy than the halved key and value traffic saves.
+- One score tile per simdgroup instead of whole 32-token groups: 6–10%
+  slower.
+- Conflict-free score row stride alone, prefetching value tiles one step
+  ahead, keys and values in 8×8 tile-major order: within noise.
+- A custom GEMM that keeps MLX's K order reproduces MLX's bits (no differing
+  element at the four global shapes), but the best of six tile configurations
+  ran 10–15% slower than MLX's kernel. Fusing the gate, residual and publish
+  epilogues into it would not pay.
+
+The four GEMMs, about 1.5 ms of each block at 640 tokens, remain the main
+cost.
+
+### Earlier measurements
+
 Same 228-frame 512×384, 60 fps clip, temporal rendering, detail 2:
 
 | Path | Whole clip | Input frames/s |

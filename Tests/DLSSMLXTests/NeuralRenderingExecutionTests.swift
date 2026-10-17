@@ -24,9 +24,7 @@ final class NeuralRenderingExecutionTests: XCTestCase {
   }
 
   func testExternalGlobalStageMatchesEvaluationAfterEveryBlockWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to check recovered global-stage parity")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to check recovered global-stage parity")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let weights = ValidatedWeights(arrays: arrays).cast(to: .float16)
     let stage = try NeuralRenderingGlobalStage(weights: weights)

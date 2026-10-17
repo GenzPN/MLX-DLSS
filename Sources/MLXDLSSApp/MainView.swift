@@ -206,6 +206,13 @@ private struct ProcessingControls: View {
         Button(model.modelPath.isEmpty ? "Choose Model…" : URL(fileURLWithPath: model.modelPath).lastPathComponent) {
           model.chooseModel(generation: false)
         }.help(model.modelPath).lineLimit(1)
+        if model.renderingNetworks.count > 1 {
+          Picker("Network", selection: $model.renderingNetwork) {
+            ForEach(model.renderingNetworks) { Text($0.rawValue).tag($0) }
+          }
+          .pickerStyle(.segmented)
+          .help("Small: 31 blocks, NVIDIA's 310.9.16 default and the faster one. HT: 71 blocks.")
+        }
         Group {
           Picker("Profile", selection: $model.profile) {
             ForEach(NeuralRenderingControlProfile.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }

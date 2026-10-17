@@ -44,6 +44,14 @@ public actor MLXNeuralRenderer: NeuralRenderBackend {
   private let model: LoadedMLXModel
   private let compiledModel: (@Sendable (MLXArray) -> MLXArray)?
   private let computePrecision: MLXComputePrecision
+  /// Block layout of a transformer package, inferred from its tensors.
+  nonisolated let topology: NeuralRenderingTopology?
+  /// The temporal blend cap the package carries (`blockN.layer0.blend_scale`
+  /// of the post block): 0.7397 for the 71-block network, 0.767 for the
+  /// 31-block small network; `nil` for packages without one.
+  public nonisolated let blendScale: Float?
+  /// `"ht (4,4,6,8,8, 71 blocks)"`, `nil` for non-transformer packages.
+  public nonisolated var networkDescription: String? { topology?.description }
 
   /// The transformer packages this backend runs: the current identifier and the
   /// one written before the project was renamed (packages built earlier still load).
@@ -67,6 +75,8 @@ public actor MLXNeuralRenderer: NeuralRenderBackend {
       )
     }
     let model: LoadedMLXModel
+    var topology: NeuralRenderingTopology?
+    var blendScale: Float?
     switch package.manifest.architecture {
     case "mlxdlss.pixel-affine.v1":
       try Self.requireStateKind(.stateless, package: package)
@@ -87,13 +97,19 @@ public actor MLXNeuralRenderer: NeuralRenderBackend {
       }
       let weights = try SafeTensorValidation.loadAndValidate(package: package)
         .cast(to: computePrecision)
+      let networkTopology = try NeuralRenderingTopology.infer(weights: weights)
+      topology = networkTopology
+      blendScale = weights["block\(networkTopology.post).layer0.blend_scale"].map {
+        $0.asType(.float32).reshaped([-1])[0].item(Float.self)
+      }
       model = .neuralRenderingTransformer(
         try NeuralRenderingTransformerModel(
           weights: weights,
           // Fused NR blocks publish half values and require float16 inputs.
           // Keep the reference MLX graph for float32 instead of trapping or reducing precision.
           compileBlocks: executionMode == .metalFused && computePrecision == .float16,
-          quantizeGlobalFFN: executionMode == .int8Fast
+          quantizeGlobalFFN: executionMode == .int8Fast,
+          topology: networkTopology
         )
       )
     default:
@@ -101,6 +117,8 @@ public actor MLXNeuralRenderer: NeuralRenderBackend {
     }
 
     self.temporalCadence = package.manifest.state.cadence
+    self.topology = topology
+    self.blendScale = blendScale
     self.package = package
     self.model = model
     self.computePrecision = computePrecision

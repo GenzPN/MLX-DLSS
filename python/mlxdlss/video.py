@@ -18,7 +18,6 @@ from typing import Any, Callable
 import numpy as np
 
 from .pipeline import NeuralRenderingPipeline
-from .temporal import BLEND_SCALE
 
 DEFAULT_ENCODE_ARGS = ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
 PIXEL_FORMATS = {"rgb24": (np.uint8, 255.0, 3), "rgb48le": ("<u2", 65535.0, 6)}
@@ -97,7 +96,7 @@ class ConvertOptions:
     robust_motion: bool = True
     motion: str = "flow"           # temporal mode: 'flow' (optical flow) or 'zero'
     scene_cut_threshold: float = 0.3
-    blend_scale: float = BLEND_SCALE
+    blend_scale: float | None = None  # None: the network's own blend cap
     backend: str = "torch"         # 'torch' (this pipeline) or 'mlxdlss' (Swift Metal runtime via `mlxdlss stream`, macOS)
     model_package: str | None = None
     mlxdlss: str | None = None

@@ -1,7 +1,9 @@
 # Frame generation: what was recovered and how it was verified
 
 MLX-DLSS's frame generator is a port of the video path of NVIDIA's DLSS
-Frame Generation library (`libnvidia-ngx-dlssg.so`, DLSS SDK 310.7.0). This
+Frame Generation library (`libnvidia-ngx-dlssg.so`, DLSS SDK 310.7.0; the
+Windows `nvngx_dlssg.dll` 310.8.0 and 310.9.16 carry the same network, see
+[library builds](#library-builds)). This
 note records the recovered graph, the evidence behind each piece and the
 numbers that tie the port to the vendor's output. Nothing proprietary is
 reproduced here: the weights stay in the user's copy of the library and are
@@ -206,6 +208,35 @@ All four complete float32 RGB outputs matched exactly. Kernel checks also
 cover strided batches, odd extents and single-pixel edges. The native media
 processor uses the same generator, with AVFoundation decode/encode and
 float32 Metal RGB between NR and FG in either order.
+
+## Library builds
+
+`mlxdlss-weights extract-fg` reads three builds and writes the same 92 tensors
+from each, bit for bit:
+
+| library | weight location |
+| --- | --- |
+| `libnvidia-ngx-dlssg.so.310.7.0` (Linux) | absolute offsets |
+| `nvngx_dlssg.dll` 310.8.0 | one contiguous weight image, found by the SHA-256 of its first 256 bytes at a 16-byte aligned position; offsets relative to it |
+| `nvngx_dlssg.dll` 310.9.16 | the same image, 9328 bytes later |
+
+A library without that image is rejected rather than read at guessed offsets.
+The PTX of 310.9.16 and 310.8.0 was compared statically; neither library was
+executed:
+
+- The synthesis network kernels (custom convolutions, `k_conv_fp16_nhwc`,
+  `k_initial_merge`) and all weights are identical, so an existing
+  `framegen.safetensors` stays valid and the port's output does not change.
+- 310.8.0 strips the names of the composition kernels to `main_kernel`;
+  310.9.16 names them (`Kernel_OutputPush`, `Kernel_OutputPull`,
+  `Prev2Curr*`, `DL1Net_Input`, `DL1Net_Output` and others), which matches
+  the roles recovered from the 310.7.0 captures.
+- `BlendCandidatesFused` changed its parameter block layout; its instruction
+  mix is nearly the same. `DownsampleRGBAndEstimateUIFused` extends the UI
+  estimation, which plain video does not use.
+- `Kernel_BlendCandidatesFGLite` is new, probably the blend of the lighter
+  frame generation preset. It is not ported: without a capture of the library
+  running it, a port could not be verified.
 
 ## Not ported
 

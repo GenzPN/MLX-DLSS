@@ -39,155 +39,15 @@ enum NeuralRenderingGraphContract {
   static let minimumInputExtent = 128
   static let inputExtentMultiple = 64
 
+  /// Window origin of a block of the 71-block network; `NeuralRenderingTopology`
+  /// gives the origins of the other networks.
   static func windowOrigin(for blockIndex: Int) -> NeuralRenderingWindowOrigin {
-    let phase: Int
-    if blockIndex == 0 {
-      phase = 0
-    } else if (1...4).contains(blockIndex) {
-      phase = blockIndex - 1
-    } else if (5...8).contains(blockIndex) {
-      phase = blockIndex - 5
-    } else if (9...14).contains(blockIndex) {
-      phase = blockIndex - 9
-    } else if (15...22).contains(blockIndex) {
-      phase = blockIndex - 15
-    } else if (23...30).contains(blockIndex) {
-      phase = blockIndex - 23
-    } else if (40...47).contains(blockIndex) {
-      phase = blockIndex - 40
-    } else if (48...55).contains(blockIndex) {
-      phase = blockIndex - 48
-    } else if (56...61).contains(blockIndex) {
-      phase = blockIndex - 54
-    } else if (62...65).contains(blockIndex) {
-      phase = blockIndex - 62
-    } else if (66...69).contains(blockIndex) {
-      phase = blockIndex - 66
-    } else if blockIndex == 70 {
-      phase = 1
-    } else {
-      return .zero
-    }
-    return [
-      .zero,
-      NeuralRenderingWindowOrigin(y: -4, x: -4),
-      NeuralRenderingWindowOrigin(y: 0, x: -4),
-      NeuralRenderingWindowOrigin(y: -4, x: 0),
-    ][phase % 4]
+    NeuralRenderingTopology.ht.windowOrigin(for: blockIndex)
   }
 
-  static let encoderStages = [
-    NeuralRenderingStageSpec(blockRange: 0...4, channels: 32),
-    NeuralRenderingStageSpec(blockRange: 5...8, channels: 64),
-    NeuralRenderingStageSpec(blockRange: 9...14, channels: 128),
-    NeuralRenderingStageSpec(blockRange: 15...22, channels: 256),
-  ]
-
-  static let decoderStages = [
-    NeuralRenderingStageSpec(blockRange: 48...55, channels: 256),
-    NeuralRenderingStageSpec(blockRange: 56...61, channels: 128),
-    NeuralRenderingStageSpec(blockRange: 62...65, channels: 64),
-    NeuralRenderingStageSpec(blockRange: 66...69, channels: 32),
-  ]
-
-  static let blocks: [NeuralRenderingBlockSpec] = {
-    var result: [NeuralRenderingBlockSpec] = []
-
-    func append(
-      _ range: ClosedRange<Int>,
-      family: NeuralRenderingBlockFamily,
-      inputChannels: Int,
-      outputChannels: Int? = nil,
-      hiddenChannels: Int? = nil,
-      headCount: Int? = nil
-    ) {
-      for index in range {
-        result.append(
-          NeuralRenderingBlockSpec(
-            index: index,
-            family: family,
-            inputChannels: inputChannels,
-            outputChannels: outputChannels ?? inputChannels,
-            hiddenChannels: hiddenChannels,
-            headCount: headCount
-          )
-        )
-      }
-    }
-
-    append(
-      0...0, family: .pre, inputChannels: 16, outputChannels: 32,
-      hiddenChannels: 128, headCount: 1)
-    append(
-      1...3, family: .window, inputChannels: 32,
-      hiddenChannels: 128, headCount: 1)
-    append(
-      4...4, family: .downsample, inputChannels: 32, outputChannels: 64,
-      hiddenChannels: 128, headCount: 1)
-    append(
-      5...7, family: .window, inputChannels: 64,
-      hiddenChannels: 224, headCount: 2)
-    append(
-      8...8, family: .downsample, inputChannels: 64, outputChannels: 128,
-      hiddenChannels: 224, headCount: 2)
-    append(
-      9...13, family: .window, inputChannels: 128,
-      hiddenChannels: 384, headCount: 4)
-    append(
-      14...14, family: .downsample, inputChannels: 128, outputChannels: 256,
-      hiddenChannels: 384, headCount: 4)
-    append(
-      15...21, family: .window, inputChannels: 256,
-      hiddenChannels: 704, headCount: 8)
-    append(
-      22...22, family: .downsample, inputChannels: 256, outputChannels: 512,
-      hiddenChannels: 704, headCount: 8)
-    append(
-      23...29, family: .splitWindow, inputChannels: 512,
-      hiddenChannels: 512, headCount: 16)
-    append(
-      30...30, family: .splitDownsample, inputChannels: 512,
-      outputChannels: 1024, hiddenChannels: 512, headCount: 16)
-    append(
-      31...38, family: .globalAttention, inputChannels: 1024,
-      hiddenChannels: 4096, headCount: 32)
-    append(
-      39...39, family: .bridge, inputChannels: 1024,
-      outputChannels: 512)
-    append(
-      40...47, family: .splitWindow, inputChannels: 512,
-      hiddenChannels: 512, headCount: 16)
-    append(
-      48...48, family: .upsample, inputChannels: 512,
-      outputChannels: 256, hiddenChannels: 704, headCount: 8)
-    append(
-      49...55, family: .window, inputChannels: 256,
-      hiddenChannels: 704, headCount: 8)
-    append(
-      56...56, family: .upsample, inputChannels: 256,
-      outputChannels: 128, hiddenChannels: 384, headCount: 4)
-    append(
-      57...61, family: .window, inputChannels: 128,
-      hiddenChannels: 384, headCount: 4)
-    append(
-      62...62, family: .upsample, inputChannels: 128,
-      outputChannels: 64, hiddenChannels: 224, headCount: 2)
-    append(
-      63...65, family: .window, inputChannels: 64,
-      hiddenChannels: 224, headCount: 2)
-    append(
-      66...66, family: .upsample, inputChannels: 64,
-      outputChannels: 32, hiddenChannels: 128, headCount: 1)
-    append(
-      67...69, family: .window, inputChannels: 32,
-      hiddenChannels: 128, headCount: 1)
-    append(
-      70...70, family: .post, inputChannels: 32, outputChannels: 4,
-      hiddenChannels: 128, headCount: 1)
-
-    precondition(result.map(\.index) == Array(0...70))
-    return result
-  }()
+  static let encoderStages = NeuralRenderingTopology.ht.encoderStages
+  static let decoderStages = NeuralRenderingTopology.ht.decoderStages
+  static let blocks: [NeuralRenderingBlockSpec] = NeuralRenderingTopology.ht.blocks
 }
 
 struct NeuralRenderingWindowBlock {
@@ -197,6 +57,9 @@ struct NeuralRenderingWindowBlock {
   /// Single-kernel path (32 channels, one head) with the publication folded in.
   private let fusedBody: ((MLXArray, Bool) -> MLXArray)?
   private let publishesOutput: Bool
+  /// The single-head kernel weights, for the stem and post variants of the kernel.
+  let fusedWeights: NeuralRenderingFusedWindowBlock.Weights?
+  let windowOrigin: NeuralRenderingWindowOrigin
 
   init(
     weights: ValidatedWeights,
@@ -204,10 +67,11 @@ struct NeuralRenderingWindowBlock {
     channels: Int,
     hiddenChannels: Int,
     headCount: Int,
-    compileBlock: Bool = false
+    compileBlock: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     let prefix = "block\(blockIndex).layer0"
-    let windowOrigin = NeuralRenderingGraphContract.windowOrigin(for: blockIndex)
+    let windowOrigin = topology.windowOrigin(for: blockIndex)
     let feedForwardCosine = try Self.require(
       weights, name: "\(prefix).ffn_cos_skip", shape: [channels]
     )
@@ -237,6 +101,7 @@ struct NeuralRenderingWindowBlock {
     )
     let operation: (MLXArray, Bool?) -> MLXArray
     var fusedWindow: ((MLXArray, Bool) -> MLXArray)?
+    var fusedWeights: NeuralRenderingFusedWindowBlock.Weights?
     if channels >= 64 {
       let expansionWeight = try Self.require(
         weights, name: "\(prefix).ffn_expand_weight",
@@ -305,6 +170,11 @@ struct NeuralRenderingWindowBlock {
       if compileBlock, channels == NeuralRenderingFusedWindowBlock.channels,
         hiddenChannels == NeuralRenderingFusedWindowBlock.hiddenChannels, headCount == 1
       {
+        fusedWeights = NeuralRenderingFusedWindowBlock.Weights(
+          expansion: expansionWeight, feedForwardProjection: feedForwardProjectionWeight,
+          feedForwardCosine: feedForwardCosine, qkv: qkvWeight, attentionScale: attentionScale,
+          attentionBias: attentionBias, attentionProjection: attentionProjectionWeight,
+          attentionCosine: attentionCosine)
         fusedWindow = { input, publish in
           NeuralRenderingFusedWindowBlock.apply(
             input,
@@ -325,11 +195,13 @@ struct NeuralRenderingWindowBlock {
     // MLX compile currently changes custom vendor-kernel semantics.
     self.body = operation
     self.fusedBody = fusedWindow
+    self.fusedWeights = fusedWeights
+    self.windowOrigin = windowOrigin
     self.fusesOutputResidual =
       compileBlock && channels >= 64 && NeuralRenderingTransformerOperations.fusedOutputResidualEnabled
-    // Block 0 is average-pooled before its single E4M3 publication and block 70
-    // feeds the output head directly.
-    self.publishesOutput = blockIndex != 0 && blockIndex != 70
+    // Block 0 is average-pooled before its single E4M3 publication and the post
+    // block feeds the output head directly.
+    self.publishesOutput = blockIndex != 0 && blockIndex != topology.post
   }
 
   func callAsFunction(_ input: MLXArray) -> MLXArray {
@@ -343,6 +215,22 @@ struct NeuralRenderingWindowBlock {
     return publishesOutput
       ? NeuralRenderingTransformerOperations.e4m3RoundTrip(output)
       : output
+  }
+
+  /// The single-head kernel with its neighbouring glue folded in
+  /// (`NeuralRenderingFusedWindowBlock.applyVariant`; `publish` defaults to the
+  /// block's own publication). `nil` without a fused kernel or with the glue
+  /// toggle off; callers check the glue's own preconditions.
+  func fusedVariant(
+    _ rows: NeuralRenderingFusedWindowBlock.Rows, epilogue: NeuralRenderingFusedWindowBlock.Epilogue,
+    publish: Bool? = nil, headWeight: MLXArray? = nil
+  ) -> [MLXArray]? {
+    guard NeuralRenderingFusedWindowBlock.fusedGlueEnabled, NeuralRenderingFusedGlue.enabled, let fusedWeights else {
+      return nil
+    }
+    return NeuralRenderingFusedWindowBlock.applyVariant(
+      rows, weights: fusedWeights, windowOrigin: windowOrigin, epilogue: epilogue,
+      publish: publish ?? publishesOutput, headWeight: headWeight)
   }
 
   /// The block output before its E4M3 publication, for the fused downsample
@@ -378,13 +266,14 @@ struct NeuralRenderingWindowBlock {
 struct NeuralRenderingWindowSequence {
   private let body: (MLXArray) -> MLXArray
 
-  init(
+  init<Indices: Sequence<Int>>(
     weights: ValidatedWeights,
-    blockIndices: ClosedRange<Int>,
+    blockIndices: Indices,
     channels: Int,
     hiddenChannels: Int,
     headCount: Int,
-    compileSequence: Bool = false
+    compileSequence: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     let blocks = try blockIndices.map { index in
       try NeuralRenderingWindowBlock(
@@ -393,7 +282,8 @@ struct NeuralRenderingWindowSequence {
         channels: channels,
         hiddenChannels: hiddenChannels,
         headCount: headCount,
-        compileBlock: compileSequence
+        compileBlock: compileSequence,
+        topology: topology
       )
     }
     let operation = { input in
@@ -426,10 +316,11 @@ struct NeuralRenderingSplitWindowBlock {
     weights: ValidatedWeights,
     blockIndex: Int,
     preciseAttention: Bool = true,
-    fusedFeedForward: Bool = false
+    fusedFeedForward: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     let blockPrefix = "block\(blockIndex)"
-    self.windowOrigin = NeuralRenderingGraphContract.windowOrigin(for: blockIndex)
+    self.windowOrigin = topology.windowOrigin(for: blockIndex)
     self.firstProjectionWeight = try Self.require(
       weights,
       name: "\(blockPrefix).layer0.first_projection_weight",
@@ -548,23 +439,27 @@ struct NeuralRenderingSplitEncoderStage {
   init(
     weights: ValidatedWeights,
     preciseAttention: Bool = true,
-    fusedFeedForward: Bool = false
+    fusedFeedForward: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
-    self.blocks = try (23...29).map { index in
+    let range = topology.splitEncoder
+    self.blocks = try range.dropLast().map { index in
       try NeuralRenderingSplitWindowBlock(
         weights: weights,
         blockIndex: index,
         preciseAttention: preciseAttention,
-        fusedFeedForward: fusedFeedForward
+        fusedFeedForward: fusedFeedForward,
+        topology: topology
       )
     }
     self.transition = try NeuralRenderingSplitWindowBlock(
       weights: weights,
-      blockIndex: 30,
+      blockIndex: range.upperBound,
       preciseAttention: preciseAttention,
-      fusedFeedForward: fusedFeedForward
+      fusedFeedForward: fusedFeedForward,
+      topology: topology
     )
-    let name = "block30.layer4.weight"
+    let name = "block\(range.upperBound).layer4.weight"
     let value = try weights.required(name)
     let expectedShape = [512, 1024]
     guard value.shape == expectedShape else {
@@ -666,22 +561,21 @@ struct NeuralRenderingGlobalBlock {
       weights, name: "\(prefix).layer4.attn_cos_skip", shape: [1024]
     )
     let body: (MLXArray) -> MLXArray = { input in
-      NeuralRenderingTransformerOperations.e4m3RoundTrip(
-        NeuralRenderingTransformerOperations.globalBlock(
-          input,
-          expansionWeight: expansionWeight,
-          feedForwardProjectionWeight: feedForwardProjectionWeight,
-          feedForwardCosine: feedForwardCosine,
-          qkvWeight: qkvWeight,
-          attentionScale: attentionScale,
-          attentionBias: nil,
-          attentionProjectionWeight: attentionProjectionWeight,
-          attentionCosine: attentionCosine,
-          headCount: 32,
-          logitCap: Self.experimentalLogitCap,
-          preciseSoftmax: preciseAttention,
-          fusedOperations: fusedOperations
-        )
+      NeuralRenderingTransformerOperations.globalBlock(
+        input,
+        expansionWeight: expansionWeight,
+        feedForwardProjectionWeight: feedForwardProjectionWeight,
+        feedForwardCosine: feedForwardCosine,
+        qkvWeight: qkvWeight,
+        attentionScale: attentionScale,
+        attentionBias: nil,
+        attentionProjectionWeight: attentionProjectionWeight,
+        attentionCosine: attentionCosine,
+        headCount: 32,
+        logitCap: Self.experimentalLogitCap,
+        preciseSoftmax: preciseAttention,
+        fusedOperations: fusedOperations,
+        publishOutput: true
       )
     }
     self.body = body
@@ -740,9 +634,10 @@ struct NeuralRenderingGlobalStage {
     quantizeFFN: Bool = false,
     preciseAttention: Bool = true,
     fusedOperations: Bool = false,
-    compileGraph: Bool = false
+    compileGraph: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
-    self.blocks = try (31...38).map { index in
+    self.blocks = try topology.globalStage.map { index in
       try NeuralRenderingGlobalBlock(
         weights: weights,
         blockIndex: index,
@@ -798,23 +693,27 @@ struct NeuralRenderingTrunk {
   init(
     weights: ValidatedWeights,
     compileBlocks: Bool = false,
-    quantizeGlobalFFN: Bool = false
+    quantizeGlobalFFN: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     self.encoder = try NeuralRenderingEncoder(
       weights: weights,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
     self.splitEncoder = try NeuralRenderingSplitEncoderStage(
       weights: weights,
       preciseAttention: true,
-      fusedFeedForward: compileBlocks
+      fusedFeedForward: compileBlocks,
+      topology: topology
     )
     self.globalStage = try NeuralRenderingGlobalStage(
       weights: weights,
       quantizeFFN: quantizeGlobalFFN,
       preciseAttention: true,
       fusedOperations: compileBlocks,
-      compileGraph: compileBlocks && ProcessInfo.processInfo.environment["MLXDLSS_COMPILE_GLOBAL"] != "0"
+      compileGraph: compileBlocks && ProcessInfo.processInfo.environment["MLXDLSS_COMPILE_GLOBAL"] != "0",
+      topology: topology
     )
   }
 
@@ -834,8 +733,8 @@ struct NeuralRenderingDecoderInput {
   private let projectionWeight: MLXArray
   private let skipSine: MLXArray
 
-  init(weights: ValidatedWeights) throws {
-    let weightName = "block39.layer0.conv_weight"
+  init(weights: ValidatedWeights, topology: NeuralRenderingTopology = .ht) throws {
+    let weightName = "block\(topology.bridge).layer0.conv_weight"
     let weight = try weights.required(weightName)
     guard weight.shape == [1024, 512] else {
       throw MLXBackendError.weightShapeMismatch(
@@ -844,7 +743,7 @@ struct NeuralRenderingDecoderInput {
         actual: weight.shape
       )
     }
-    let skipSineName = "block39.layer0.inp_upsample_sin"
+    let skipSineName = "block\(topology.bridge).layer0.inp_upsample_sin"
     let skipSine = try weights.required(skipSineName)
     guard skipSine.shape == [512] else {
       throw MLXBackendError.weightShapeMismatch(
@@ -884,7 +783,8 @@ struct NeuralRenderingUpsampleBlock {
     channels: Int,
     hiddenChannels: Int,
     headCount: Int,
-    compileBlocks: Bool = false
+    compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     let prefix = "block\(blockIndex).layer0"
     let weightName = "\(prefix).weight0"
@@ -913,7 +813,8 @@ struct NeuralRenderingUpsampleBlock {
       channels: channels,
       hiddenChannels: hiddenChannels,
       headCount: headCount,
-      compileBlock: compileBlocks
+      compileBlock: compileBlocks,
+      topology: topology
     )
   }
 
@@ -921,6 +822,14 @@ struct NeuralRenderingUpsampleBlock {
     let projected = matmul(input, projectionWeight)
     // The fused upsample kernels read the merged tensor as E4M3 (vendor
     // decoder captures: blocks 48/56/62 move from 0.037-0.041 to 0.019-0.022).
+    if NeuralRenderingFusedGlue.canMerge(low: projected, skip: skip),
+      skip.shape[3] == NeuralRenderingFusedWindowBlock.channels,
+      let outputs = windowBlock.fusedVariant(
+        .merge(low: projected, skip: skip, lowScale: nil, skipScale: skipSine, publish: true), epilogue: .store)
+    {
+      // Merge and block in one kernel.
+      return outputs[0]
+    }
     if NeuralRenderingFusedGlue.canMerge(low: projected, skip: skip) {
       return windowBlock(
         NeuralRenderingFusedGlue.upsampleMerge(
@@ -943,30 +852,37 @@ struct NeuralRenderingFirstDecoderStage {
   private let upsample: NeuralRenderingUpsampleBlock
   private let blocks: NeuralRenderingWindowSequence
 
-  init(weights: ValidatedWeights, compileBlocks: Bool = false) throws {
-    self.splitBlocks = try (40...47).map { index in
+  init(
+    weights: ValidatedWeights, compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
+  ) throws {
+    self.splitBlocks = try topology.splitDecoder.map { index in
       try NeuralRenderingSplitWindowBlock(
         weights: weights,
         blockIndex: index,
         preciseAttention: true,
-        fusedFeedForward: compileBlocks
+        fusedFeedForward: compileBlocks,
+        topology: topology
       )
     }
+    let stage = topology.decoderStage(3)
     self.upsample = try NeuralRenderingUpsampleBlock(
       weights: weights,
-      blockIndex: 48,
+      blockIndex: stage.lowerBound,
       channels: 256,
       hiddenChannels: 704,
       headCount: 8,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
     self.blocks = try NeuralRenderingWindowSequence(
       weights: weights,
-      blockIndices: 49...55,
+      blockIndices: stage.dropFirst(),
       channels: 256,
       hiddenChannels: 704,
       headCount: 8,
-      compileSequence: compileBlocks
+      compileSequence: compileBlocks,
+      topology: topology
     )
   }
 
@@ -983,11 +899,12 @@ struct NeuralRenderingDecoderStage {
   init(
     weights: ValidatedWeights,
     upsampleBlock: Int,
-    regularBlocks: ClosedRange<Int>,
+    regularBlocks: some Sequence<Int>,
     channels: Int,
     hiddenChannels: Int,
     headCount: Int,
-    compileBlocks: Bool = false
+    compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     self.upsample = try NeuralRenderingUpsampleBlock(
       weights: weights,
@@ -995,7 +912,8 @@ struct NeuralRenderingDecoderStage {
       channels: channels,
       hiddenChannels: hiddenChannels,
       headCount: headCount,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
     self.blocks = try NeuralRenderingWindowSequence(
       weights: weights,
@@ -1003,7 +921,8 @@ struct NeuralRenderingDecoderStage {
       channels: channels,
       hiddenChannels: hiddenChannels,
       headCount: headCount,
-      compileSequence: compileBlocks
+      compileSequence: compileBlocks,
+      topology: topology
     )
   }
 
@@ -1018,38 +937,32 @@ struct NeuralRenderingDecoder {
   private let third: NeuralRenderingDecoderStage
   private let fourth: NeuralRenderingDecoderStage
 
-  init(weights: ValidatedWeights, compileBlocks: Bool = false) throws {
+  init(
+    weights: ValidatedWeights, compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
+  ) throws {
     self.first = try NeuralRenderingFirstDecoderStage(
       weights: weights,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
-    self.second = try NeuralRenderingDecoderStage(
-      weights: weights,
-      upsampleBlock: 56,
-      regularBlocks: 57...61,
-      channels: 128,
-      hiddenChannels: 384,
-      headCount: 4,
-      compileBlocks: compileBlocks
-    )
-    self.third = try NeuralRenderingDecoderStage(
-      weights: weights,
-      upsampleBlock: 62,
-      regularBlocks: 63...65,
-      channels: 64,
-      hiddenChannels: 224,
-      headCount: 2,
-      compileBlocks: compileBlocks
-    )
-    self.fourth = try NeuralRenderingDecoderStage(
-      weights: weights,
-      upsampleBlock: 66,
-      regularBlocks: 67...69,
-      channels: 32,
-      hiddenChannels: 128,
-      headCount: 1,
-      compileBlocks: compileBlocks
-    )
+    func stage(_ index: Int) throws -> NeuralRenderingDecoderStage {
+      let blocks = topology.decoderStage(index)
+      let channels = NeuralRenderingTopology.encoderChannels[index]
+      return try NeuralRenderingDecoderStage(
+        weights: weights,
+        upsampleBlock: blocks.lowerBound,
+        regularBlocks: blocks.dropFirst(),
+        channels: channels,
+        hiddenChannels: NeuralRenderingTopology.hiddenChannels(channels: channels),
+        headCount: NeuralRenderingTopology.headCount(channels: channels),
+        compileBlocks: compileBlocks,
+        topology: topology
+      )
+    }
+    self.second = try stage(2)
+    self.third = try stage(1)
+    self.fourth = try stage(0)
   }
 
   func callAsFunction(_ input: MLXArray, skips: [MLXArray]) -> MLXArray {
@@ -1074,8 +987,11 @@ struct NeuralRenderingPostBlock {
   let outputConvolution: MLXArray
   let headWeight: MLXArray
 
-  init(weights: ValidatedWeights, compileBlocks: Bool = false) throws {
-    let prefix = "block70.layer0"
+  init(
+    weights: ValidatedWeights, compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
+  ) throws {
+    let prefix = "block\(topology.post).layer0"
     self.sine = try Self.require(
       weights, name: "\(prefix).inp_merge_sin", shape: [32]
     )
@@ -1084,11 +1000,12 @@ struct NeuralRenderingPostBlock {
     )
     self.windowBlock = try NeuralRenderingWindowBlock(
       weights: weights,
-      blockIndex: 70,
+      blockIndex: topology.post,
       channels: 32,
       hiddenChannels: 128,
       headCount: 1,
-      compileBlock: compileBlocks
+      compileBlock: compileBlocks,
+      topology: topology
     )
     let outputGain = try Self.require(
       weights, name: "\(prefix).out_gain", shape: [16, 4]
@@ -1108,6 +1025,15 @@ struct NeuralRenderingPostBlock {
   }
 
   func callAsFunction(_ input: MLXArray, skip: MLXArray) -> MLXArray {
+    if Self.fusedHeadEnabled, NeuralRenderingFusedGlue.canMerge(low: input, skip: skip),
+      input.shape[3] == NeuralRenderingFusedWindowBlock.channels,
+      let outputs = windowBlock.fusedVariant(
+        .merge(low: input, skip: skip, lowScale: sine, skipScale: cosine, publish: false), epilogue: .head,
+        headWeight: headWeight)
+    {
+      // Merge, block and head in one kernel.
+      return outputs[0]
+    }
     let merged: MLXArray
     if NeuralRenderingFusedGlue.canMerge(low: input, skip: skip) {
       merged = NeuralRenderingFusedGlue.upsampleMerge(
@@ -1160,29 +1086,38 @@ struct NeuralRenderingPostBlock {
 }
 
 struct NeuralRenderingTransformerModel {
+  let topology: NeuralRenderingTopology
   private let trunk: NeuralRenderingTrunk
   private let decoderInput: NeuralRenderingDecoderInput
   private let decoder: NeuralRenderingDecoder
   private let post: NeuralRenderingPostBlock
 
+  /// Builds the graph the weights describe; `topology` defaults to the one the
+  /// tensor names and shapes imply (71-block HT or 31-block small).
   init(
     weights: ValidatedWeights,
     compileBlocks: Bool = false,
-    quantizeGlobalFFN: Bool = false
+    quantizeGlobalFFN: Bool = false,
+    topology: NeuralRenderingTopology? = nil
   ) throws {
+    let topology = try topology ?? NeuralRenderingTopology.infer(weights: weights)
+    self.topology = topology
     self.trunk = try NeuralRenderingTrunk(
       weights: weights,
       compileBlocks: compileBlocks,
-      quantizeGlobalFFN: quantizeGlobalFFN
+      quantizeGlobalFFN: quantizeGlobalFFN,
+      topology: topology
     )
-    self.decoderInput = try NeuralRenderingDecoderInput(weights: weights)
+    self.decoderInput = try NeuralRenderingDecoderInput(weights: weights, topology: topology)
     self.decoder = try NeuralRenderingDecoder(
       weights: weights,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
     self.post = try NeuralRenderingPostBlock(
       weights: weights,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
   }
 
@@ -1239,6 +1174,18 @@ struct NeuralRenderingPreBlock {
     return matmul(input, inputAdapterWeight)
   }
 
+  /// Adapter, block 0, publication and 2×2 pool in one kernel, when it applies:
+  /// `publishAndPool(transform(project(input)), emitFull: true)`.
+  func fusedStem(_ input: MLXArray) -> (full: MLXArray, pooled: MLXArray)? {
+    guard windowBlock.windowOrigin == .zero, input.ndim == 4, input.shape[0] == 1, input.shape[3] == 16,
+      input.dtype == .float16, inputAdapterWeight.shape == [16, 32],
+      input.shape[1].isMultiple(of: 2), input.shape[2].isMultiple(of: 2),
+      let outputs = windowBlock.fusedVariant(
+        .adapter(input: input, weight: inputAdapterWeight), epilogue: .pool, publish: true)
+    else { return nil }
+    return (outputs[1], outputs[0])
+  }
+
   func transform(_ input: MLXArray) -> MLXArray {
     windowBlock(input)
   }
@@ -1253,18 +1200,22 @@ struct NeuralRenderingEncoderStem {
   private let pre: NeuralRenderingPreBlock
   private let blocks: NeuralRenderingWindowSequence
 
-  init(weights: ValidatedWeights, compileBlocks: Bool = false) throws {
+  init(
+    weights: ValidatedWeights, compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
+  ) throws {
     self.pre = try NeuralRenderingPreBlock(
       weights: weights,
       compileBlocks: compileBlocks
     )
     self.blocks = try NeuralRenderingWindowSequence(
       weights: weights,
-      blockIndices: 1...3,
+      blockIndices: topology.encoderStage(0).dropLast(),
       channels: 32,
       hiddenChannels: 128,
       headCount: 1,
-      compileSequence: compileBlocks
+      compileSequence: compileBlocks,
+      topology: topology
     )
   }
 
@@ -1278,6 +1229,9 @@ struct NeuralRenderingEncoderStem {
     // pixel-level grain (four DLL goldens at 256: MAE 0.0118 -> 0.0055,
     // high-pass correlation 0.52 -> 0.94; five native crops: 0.0073-0.0113
     // -> 0.0037-0.0046).
+    if let fused = pre.fusedStem(input) {
+      return NeuralRenderingEncoderStemOutput(fullResolutionSkip: fused.full, skip: blocks(fused.pooled))
+    }
     let block0Output = pre.transform(pre.project(input))
     if NeuralRenderingFusedGlue.canPool(block0Output) {
       let published = NeuralRenderingFusedGlue.publishAndPool(block0Output, emitFull: true)
@@ -1310,7 +1264,8 @@ struct NeuralRenderingDownsampleBlock {
     channels: Int,
     hiddenChannels: Int,
     headCount: Int,
-    compileBlocks: Bool = false
+    compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     self.windowBlock = try NeuralRenderingWindowBlock(
       weights: weights,
@@ -1318,9 +1273,10 @@ struct NeuralRenderingDownsampleBlock {
       channels: channels,
       hiddenChannels: hiddenChannels,
       headCount: headCount,
-      compileBlock: compileBlocks
+      compileBlock: compileBlocks,
+      topology: topology
     )
-    self.padsForSplitTransition = blockIndex == 22
+    self.padsForSplitTransition = blockIndex == topology.lastEncoderDownsample
     let name = "block\(blockIndex).layer0.weight0"
     let value = try weights.required(name)
     let expectedShape = [channels, channels * 2]
@@ -1339,6 +1295,13 @@ struct NeuralRenderingDownsampleBlock {
     // output, publish the pooled tensor as E4M3, project it with QMMA and
     // publish again (vendor transition captures: 0.010-0.021 versus
     // 0.026-0.031 for pool-then-project on the published tensor).
+    if !padsForSplitTransition, NeuralRenderingFusedGlue.canPool(input), windowBlock.windowOrigin.y.isMultiple(of: 2),
+      windowBlock.windowOrigin.x.isMultiple(of: 2), input.shape[3] == NeuralRenderingFusedWindowBlock.channels,
+      let pooled = windowBlock.fusedVariant(.input(input), epilogue: .pool, publish: false)?[0]
+    {
+      // Block, pool and publication in one kernel.
+      return NeuralRenderingTransformerOperations.e4m3RoundTrip(matmul(pooled, weight))
+    }
     let transformed = windowBlock.unpublished(input)
     let downsampleInput =
       padsForSplitTransition
@@ -1372,18 +1335,23 @@ struct NeuralRenderingFirstEncoderStage {
   private let stem: NeuralRenderingEncoderStem
   private let transition: NeuralRenderingDownsampleBlock
 
-  init(weights: ValidatedWeights, compileBlocks: Bool = false) throws {
+  init(
+    weights: ValidatedWeights, compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
+  ) throws {
     self.stem = try NeuralRenderingEncoderStem(
       weights: weights,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
     self.transition = try NeuralRenderingDownsampleBlock(
       weights: weights,
-      blockIndex: 4,
+      blockIndex: topology.encoderStage(0).upperBound,
       channels: 32,
       hiddenChannels: 128,
       headCount: 1,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
   }
 
@@ -1403,12 +1371,13 @@ struct NeuralRenderingEncoderStage {
 
   init(
     weights: ValidatedWeights,
-    regularBlocks: ClosedRange<Int>,
+    regularBlocks: some Sequence<Int>,
     transitionBlock: Int,
     channels: Int,
     hiddenChannels: Int,
     headCount: Int,
-    compileBlocks: Bool = false
+    compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
   ) throws {
     self.blocks = try NeuralRenderingWindowSequence(
       weights: weights,
@@ -1416,7 +1385,8 @@ struct NeuralRenderingEncoderStage {
       channels: channels,
       hiddenChannels: hiddenChannels,
       headCount: headCount,
-      compileSequence: compileBlocks
+      compileSequence: compileBlocks,
+      topology: topology
     )
     self.transition = try NeuralRenderingDownsampleBlock(
       weights: weights,
@@ -1424,7 +1394,8 @@ struct NeuralRenderingEncoderStage {
       channels: channels,
       hiddenChannels: hiddenChannels,
       headCount: headCount,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
   }
 
@@ -1449,38 +1420,32 @@ struct NeuralRenderingEncoder {
   private let third: NeuralRenderingEncoderStage
   private let fourth: NeuralRenderingEncoderStage
 
-  init(weights: ValidatedWeights, compileBlocks: Bool = false) throws {
+  init(
+    weights: ValidatedWeights, compileBlocks: Bool = false,
+    topology: NeuralRenderingTopology = .ht
+  ) throws {
     self.first = try NeuralRenderingFirstEncoderStage(
       weights: weights,
-      compileBlocks: compileBlocks
+      compileBlocks: compileBlocks,
+      topology: topology
     )
-    self.second = try NeuralRenderingEncoderStage(
-      weights: weights,
-      regularBlocks: 5...7,
-      transitionBlock: 8,
-      channels: 64,
-      hiddenChannels: 224,
-      headCount: 2,
-      compileBlocks: compileBlocks
-    )
-    self.third = try NeuralRenderingEncoderStage(
-      weights: weights,
-      regularBlocks: 9...13,
-      transitionBlock: 14,
-      channels: 128,
-      hiddenChannels: 384,
-      headCount: 4,
-      compileBlocks: compileBlocks
-    )
-    self.fourth = try NeuralRenderingEncoderStage(
-      weights: weights,
-      regularBlocks: 15...21,
-      transitionBlock: 22,
-      channels: 256,
-      hiddenChannels: 704,
-      headCount: 8,
-      compileBlocks: compileBlocks
-    )
+    func stage(_ index: Int) throws -> NeuralRenderingEncoderStage {
+      let blocks = topology.encoderStage(index)
+      let channels = NeuralRenderingTopology.encoderChannels[index]
+      return try NeuralRenderingEncoderStage(
+        weights: weights,
+        regularBlocks: blocks.dropLast(),
+        transitionBlock: blocks.upperBound,
+        channels: channels,
+        hiddenChannels: NeuralRenderingTopology.hiddenChannels(channels: channels),
+        headCount: NeuralRenderingTopology.headCount(channels: channels),
+        compileBlocks: compileBlocks,
+        topology: topology
+      )
+    }
+    self.second = try stage(1)
+    self.third = try stage(2)
+    self.fourth = try stage(3)
   }
 
   func callAsFunction(_ input: MLXArray) -> NeuralRenderingEncoderOutput {
@@ -1509,9 +1474,10 @@ enum NeuralRenderingTransformerOperations {
   /// 3.0 on each block); window-block kernels show no cap.
   static let globalAttentionLogitCap: Float = 3
   static let experimentalGlobalAttentionLogitCap: Float = globalAttentionLogitCap
-  /// Half inputs round to E4M3 with 16-bit integer arithmetic (bit-exact with
-  /// the float path for every half value); `MLXDLSS_FAST_E4M3=0` restores the
-  /// float path (diagnostics).
+  /// Half inputs round to E4M3 with 16-bit integer arithmetic and one half
+  /// magic-number add (bit-exact with the float path for every half value,
+  /// `PerfSpikeKernelTimingTests.testFastE4M3IsBitExactOnGPU`);
+  /// `MLXDLSS_FAST_E4M3=0` restores the float path (diagnostics).
   nonisolated(unsafe) static var fastE4M3Enabled: Bool =
     ProcessInfo.processInfo.environment["MLXDLSS_FAST_E4M3"] != "0"
   static var e4m3MetalHeaderText: String { fastE4M3Enabled ? fastE4M3MetalHeader : e4m3MetalHeader }
@@ -1552,21 +1518,29 @@ enum NeuralRenderingTransformerOperations {
 
       uint8_t bits;
     };
+    // The range-restricted forms of the fast header, here the float path.
+    inline half mlxdlss_e4m3_no_nan(half value) { return half(float(mlxdlss_e4m3(value))); }
+    inline half mlxdlss_e4m3_nonnegative(half value) { return half(float(mlxdlss_e4m3(value))); }
     """#
   private static let fastE4M3MetalHeader = #"""
+    // A non-negative half no larger than 448, given by its bits, rounded to
+    // nearest even on the E4M3 grid with one magic-number add: 2^(e + 7) for the
+    // input exponent e (at least -6) has a half ulp of 2^(e - 3), the E4M3 step
+    // at that exponent (2^-9 in the E4M3 subnormal range below 2^-6).
+    inline half mlxdlss_e4m3_magnitude(ushort bits) {
+      const half magic = as_type<half>(ushort(max(ushort(bits & 0x7C00), ushort(0x2400)) + 0x1C00));
+      return (as_type<half>(bits) + magic) - magic;
+    }
     struct mlxdlss_e4m3 {
-      // Half inputs: saturate at 448, round-to-nearest-even at three mantissa bits,
-      // and quantise the E4M3 subnormal range (< 2^-6) to multiples of 2^-9 with
-      // the half magic-number add. Same value as the float path for every half.
+      // Half inputs: the magnitude saturates at 448 (Inf and NaN included) and
+      // rounds on the E4M3 grid, the sign comes back afterwards. Same value as
+      // the float path for every half.
       mlxdlss_e4m3(half value) {
         ushort b = as_type<ushort>(value);
         ushort m = b & 0x7FFF;
         // NaN inputs saturate to +448 like the float path (their sign is dropped by the conversion).
-        ushort s = m > 0x7C00 ? ushort(0) : ushort(b & 0x8000);
-        ushort normal = ushort((m + 0x3F + ((m >> 7) & 1)) & 0xFF80);
-        half small = (as_type<half>(m) + 2.0h) - 2.0h;
-        ushort r = m >= 0x5F00 ? ushort(0x5F00) : (m < 0x2400 ? as_type<ushort>(small) : normal);
-        rounded = as_type<half>(ushort(r | s));
+        ushort s = m > 0x7C00 ? ushort(0) : ushort(b ^ m);
+        rounded = as_type<half>(ushort(as_type<ushort>(mlxdlss_e4m3_magnitude(min(m, ushort(0x5F00)))) | s));
       }
       mlxdlss_e4m3(float value) {
         uint32_t fp8Max = 543 << 21;
@@ -1600,6 +1574,14 @@ enum NeuralRenderingTransformerOperations {
 
       half rounded;
     };
+    // E4M3 of a half that cannot be NaN (Inf saturates like any value from 448 up).
+    inline half mlxdlss_e4m3_no_nan(half value) {
+      const ushort b = as_type<ushort>(value);
+      const ushort m = b & 0x7FFF;
+      return as_type<half>(ushort(as_type<ushort>(mlxdlss_e4m3_magnitude(min(m, ushort(0x5F00)))) | (b ^ m)));
+    }
+    // E4M3 of a half from +0 up to, but excluding, 448.
+    inline half mlxdlss_e4m3_nonnegative(half value) { return mlxdlss_e4m3_magnitude(as_type<ushort>(value)); }
     """#
   private static let e4m3RoundTripKernel = MLXFast.metalKernel(
     name: "mlxdlss_e4m3_round_trip",
@@ -2121,8 +2103,17 @@ enum NeuralRenderingTransformerOperations {
     precondition(projectionWeight.shape == [channels, channels])
 
     let projected = matmul(input, qkvWeight)
-    let qkv = split(projected, parts: 3, axis: -1)
     let headChannels = channels / headCount
+    if streamedGlobalAttention, preciseSoftmax, attentionBias == nil,
+      symmetricLogitCap, logitCap == 3, headChannels == 32,
+      projected.dtype == .float16, tokenCount.isMultiple(of: 2),
+      NeuralRenderingStreamedGlobalAttention.projectedEnabled(tokens: tokenCount)
+    {
+      let attended = NeuralRenderingStreamedGlobalAttention.applyProjected(
+        projected, heads: headCount, queryScale: attentionScale)
+      return matmul(attended, projectionWeight)
+    }
+    let qkv = split(projected, parts: 3, axis: -1)
     let headShape = [batchCount, tokenCount, headCount, headChannels]
     let query = qkv[0].reshaped(headShape).transposed(0, 2, 1, 3)
     let key = qkv[1].reshaped(headShape).transposed(0, 2, 1, 3)
@@ -2628,6 +2619,35 @@ enum NeuralRenderingTransformerOperations {
     publishedOutput: Bool? = nil
   ) -> MLXArray {
     precondition(input.ndim == 4)
+    let channels = input.shape[3]
+    let fusesPublishedResidual = fusedAttention && fusedResidualEnabled && input.dtype == .float16
+    if fusedFeedForward, denseFeedForwardEnabled, fusesPublishedResidual, NeuralRenderingFusedBranchedFeedForward.isEnabled,
+      NeuralRenderingFusedBranchedFeedForward.blockChannels.contains(channels),
+      let denseExpansionWeight, let groupedProjectionWeight
+    {
+      // The whole feed-forward and its published residual in one kernel.
+      let feedForwardOutput = NeuralRenderingFusedBranchedFeedForward.apply(
+        input,
+        denseExpansionWeight: denseExpansionWeight,
+        groupedProjectionWeight: groupedProjectionWeight,
+        outputProjectionWeight: outputProjectionWeight,
+        cosine: feedForwardCosine
+      )
+      return windowAttentionResidual(
+        feedForwardOutput,
+        qkvWeight: qkvWeight,
+        attentionScale: attentionScale,
+        attentionBias: attentionBias,
+        attentionProjectionWeight: attentionProjectionWeight,
+        attentionCosine: attentionCosine,
+        headCount: headCount,
+        windowSize: windowSize,
+        windowOrigin: windowOrigin,
+        preciseSoftmax: preciseSoftmax,
+        fusedAttention: fusedAttention,
+        publishedOutput: publishedOutput
+      )
+    }
     let feedForwardBranch: MLXArray
     if fusedFeedForward, denseFeedForwardEnabled, let denseExpansionWeight, let groupedProjectionWeight {
       feedForwardBranch = denseBranchedFeedForward(
@@ -2655,7 +2675,7 @@ enum NeuralRenderingTransformerOperations {
     // Published as E4M3 before the attention reads it (multi-head kernels only;
     // the single-head window block keeps its residual in fp16 registers).
     let feedForwardOutput =
-      fusedAttention && fusedResidualEnabled && input.dtype == .float16 && feedForwardBranch.dtype == .float16
+      fusesPublishedResidual && feedForwardBranch.dtype == .float16
       ? NeuralRenderingFusedWindowAttention.cosineResidual(
         skip: input, branch: feedForwardBranch, cosine: feedForwardCosine, publish: true)
       : e4m3RoundTrip(
@@ -2665,6 +2685,55 @@ enum NeuralRenderingTransformerOperations {
           cosine: feedForwardCosine
         )
       )
+    return windowAttentionResidual(
+      feedForwardOutput,
+      qkvWeight: qkvWeight,
+      attentionScale: attentionScale,
+      attentionBias: attentionBias,
+      attentionProjectionWeight: attentionProjectionWeight,
+      attentionCosine: attentionCosine,
+      headCount: headCount,
+      windowSize: windowSize,
+      windowOrigin: windowOrigin,
+      preciseSoftmax: preciseSoftmax,
+      fusedAttention: fusedAttention,
+      publishedOutput: publishedOutput
+    )
+  }
+
+  /// Second half of a multi-head window block: attention on the published
+  /// feed-forward output and the block's final residual.
+  private static func windowAttentionResidual(
+    _ feedForwardOutput: MLXArray,
+    qkvWeight: MLXArray,
+    attentionScale: MLXArray,
+    attentionBias: MLXArray,
+    attentionProjectionWeight: MLXArray,
+    attentionCosine: MLXArray,
+    headCount: Int,
+    windowSize: Int,
+    windowOrigin: NeuralRenderingWindowOrigin,
+    preciseSoftmax: Bool,
+    fusedAttention: Bool,
+    publishedOutput: Bool?
+  ) -> MLXArray {
+    if let publishedOutput, fusedAttention, fusedAttentionEnabled, fusedOutputResidualEnabled, fusedResidualEnabled,
+      NeuralRenderingFusedWindowAttentionBlock.isEnabled, preciseSoftmax, windowSize == 8,
+      feedForwardOutput.ndim == 4, feedForwardOutput.shape[0] == 1, feedForwardOutput.dtype == .float16,
+      feedForwardOutput.shape[3] == headCount * 32,
+      NeuralRenderingFusedWindowAttentionBlock.blockChannels.contains(feedForwardOutput.shape[3])
+    {
+      return NeuralRenderingFusedWindowAttentionBlock.apply(
+        feedForwardOutput,
+        qkvWeight: qkvWeight,
+        attentionScale: attentionScale,
+        attentionBias: attentionBias,
+        projectionWeight: attentionProjectionWeight,
+        cosine: attentionCosine,
+        windowOrigin: windowOrigin,
+        publish: publishedOutput
+      )
+    }
     let attentionBranch = windowAttention(
       feedForwardOutput,
       qkvWeight: qkvWeight,
@@ -2881,7 +2950,8 @@ enum NeuralRenderingTransformerOperations {
     headCount: Int,
     logitCap: Float? = globalAttentionLogitCap,
     preciseSoftmax: Bool = true,
-    fusedOperations: Bool = false
+    fusedOperations: Bool = false,
+    publishOutput: Bool = false
   ) -> MLXArray {
     precondition(input.ndim == 4)
     let shape = input.shape
@@ -2911,10 +2981,18 @@ enum NeuralRenderingTransformerOperations {
       preciseSoftmax: preciseSoftmax,
       streamedGlobalAttention: fusedOperations
     )
-    return cosineResidual(
-      skip: feedForwardOutput,
-      branch: attentionBranch,
-      cosine: attentionCosine
+    guard publishOutput else {
+      return cosineResidual(
+        skip: feedForwardOutput,
+        branch: attentionBranch,
+        cosine: attentionCosine
+      ).reshaped(shape)
+    }
+    // The fused residual publishes in the same pass (same roundings).
+    return (fusedOperations && attentionBranch.dtype == .float16 && feedForwardOutput.dtype == .float16
+      ? NeuralRenderingFusedWindowAttention.cosineResidual(
+        skip: feedForwardOutput, branch: attentionBranch, cosine: attentionCosine, publish: true)
+      : e4m3RoundTrip(cosineResidual(skip: feedForwardOutput, branch: attentionBranch, cosine: attentionCosine))
     ).reshaped(shape)
   }
 

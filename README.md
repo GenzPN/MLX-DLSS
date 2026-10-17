@@ -59,15 +59,25 @@ Initial extraction uses Python 3.10+:
 ```sh
 python3 -m pip install ./python
 mlxdlss-weights all nvngx_dlssnr.dll weights/
-mlxdlss-weights extract-fg libnvidia-ngx-dlssg.so.310.7.0 weights/framegen.safetensors
+mlxdlss-weights extract-fg nvngx_dlssg.dll weights/framegen.safetensors
 ```
 
-Supported sources: `nvngx_dlssnr.dll` version **310.8.0.0** and frame generation
-from **DLSS SDK 310.7.0**. `mlxdlss-weights sha256 FILE` checks the DLL build.
+| Library | Supported builds | Networks |
+| --- | --- | --- |
+| `nvngx_dlssnr.dll` | **310.8.0.0** | HT (71 blocks) |
+| `nvngx_dlssnr.dll` | **310.9.16.0** | HT and the small FP8 network (31 blocks), NVIDIA's new default |
+| `nvngx_dlssg.dll` | **310.8.0**, **310.9.16** | frame generation |
+| `libnvidia-ngx-dlssg.so` | **310.7.0** (DLSS SDK) | frame generation, the same weights |
 
-Outputs: `NeuralRendering.dlssmodel` for Metal,
-`dlssnr-weights-logical.safetensors` for PyTorch and `framegen.safetensors` for
-either backend.
+`mlxdlss-weights sha256 FILE` checks the DLL build.
+
+Outputs: `NeuralRendering.dlssmodel` (HT) and, from 310.9.16,
+`NeuralRendering-Small.dlssmodel` for Metal; the matching
+`dlssnr-weights-logical.safetensors` and `dlssnr-small-weights-logical.safetensors`
+for PyTorch; `framegen.safetensors` for either backend. The app selects the
+small network when it finds both and shows an HT/Small switch. The
+[small network](docs/recovery-notes.md#the-small-fp8-network) has no NVIDIA
+parity measurement yet.
 
 ## CLI
 
@@ -132,9 +142,12 @@ Python API, see the [Python guide](python/README.md).
 | Neural rendering vs NVIDIA | 0.004–0.005 MAE on 1152–1408 px game renders |
 | Frame generation vs NVIDIA | 59.9 dB PSNR; maximum difference 3/255 |
 | Native temporal video, M2 Max | 18.4–20.1 input frames/s |
+| 1080p temporal video, M2 Max | HT 6.2–6.3 input frames/s, small 9.9–10.2 |
 
 The video sample has 228 frames at 512×384, detail strength 2: **11.33–12.36 s**
-including startup, motion, decode and encode. Desktop load affects timings.
+including startup, motion, decode and encode. The 1080p clip has 60 frames:
+HT 9.59–9.69 s (12.18 s at `0ca2dea`), small 5.91–6.05 s.
+Desktop load affects timings.
 See [measurements and experiments](docs/embedding.md#performance),
 [FG benchmarks](docs/frame-generation.md#speed) and [parity limits](docs/recovery-notes.md).
 

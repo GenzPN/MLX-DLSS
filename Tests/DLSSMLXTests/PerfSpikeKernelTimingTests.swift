@@ -265,7 +265,12 @@ final class PerfSpikeKernelTimingTests: XCTestCase {
         const ushort fastHalf = as_type<ushort>(half(float(mlxdlss_e4m3_fast(h))));
         const ushort fastFloat = as_type<ushort>(half(float(mlxdlss_e4m3_fast(float(h)))));
         const ushort refFloat = as_type<ushort>(half(float(mlxdlss_e4m3_ref(float(h)))));
-        mismatch[i] = uint32_t(ref != fastHalf) + 1000u * uint32_t(ref != fastFloat) + 1000000u * uint32_t(ref != refFloat);
+        // The range-restricted forms over their domains: every non-NaN half, and +0 up to 448.
+        const ushort m = ushort(i) & 0x7FFF;
+        const bool noNanBad = m <= 0x7C00 && as_type<ushort>(mlxdlss_e4m3_fast_no_nan(h)) != ref;
+        const bool nonnegativeBad = i < 0x5F00 && as_type<ushort>(mlxdlss_e4m3_fast_nonnegative(h)) != ref;
+        mismatch[i] = uint32_t(ref != fastHalf || noNanBad || nonnegativeBad) + 1000u * uint32_t(ref != fastFloat)
+          + 1000000u * uint32_t(ref != refFloat);
         """#,
       header: header)
     let input = MLXArray((0..<65536).map { UInt32($0) })
@@ -306,7 +311,8 @@ final class PerfSpikeKernelTimingTests: XCTestCase {
   }
 
   func testFusedOutputResidualIsBitExact() throws {
-    guard enabled, let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS") }
+    guard enabled else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1") }
+    let path = try htLogicalWeightsPath("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS")
     typealias Ops = NeuralRenderingTransformerOperations
     let weights = ValidatedWeights(arrays: try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)).cast(to: .float16)
     let saved = Ops.fusedOutputResidualEnabled
@@ -539,7 +545,8 @@ final class PerfSpikeKernelTimingTests: XCTestCase {
   // MARK: 14. post block pieces on real weights (why does block 70 cost 33 ms?)
 
   func testPostBlockPieces() throws {
-    guard enabled, let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS") }
+    guard enabled else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1") }
+    let path = try htLogicalWeightsPath("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS")
     typealias Ops = NeuralRenderingTransformerOperations
     let weights = ValidatedWeights(arrays: try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)).cast(to: .float16)
     let post = try NeuralRenderingPostBlock(weights: weights, compileBlocks: true)
@@ -567,7 +574,8 @@ final class PerfSpikeKernelTimingTests: XCTestCase {
   // MARK: 15. real global stage at the 1080p token count: eval/v2/materialized in one process
 
   func testGlobalStageAB() throws {
-    guard enabled, let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS") }
+    guard enabled else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1") }
+    let path = try htLogicalWeightsPath("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS")
     let weights = ValidatedWeights(arrays: try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)).cast(to: .float16)
     let stage = try NeuralRenderingGlobalStage(weights: weights, quantizeFFN: false, preciseAttention: true, fusedOperations: true, compileGraph: true)
     let savedEval = NeuralRenderingGlobalStage.perBlockEvalEnabled
@@ -826,7 +834,8 @@ final class PerfSpikeKernelTimingTests: XCTestCase {
   // MARK: 20. compiled vs eager global stage at the 1080p token count, one process
 
   func testGlobalStageCompileAB() throws {
-    guard enabled, let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS") }
+    guard enabled else { throw XCTSkip("MLXDLSS_PERF_SPIKE=1") }
+    let path = try htLogicalWeightsPath("MLXDLSS_PERF_SPIKE=1 and MLXDLSS_LOGICAL_WEIGHTS")
     let weights = ValidatedWeights(arrays: try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)).cast(to: .float16)
     let compiled = try NeuralRenderingGlobalStage(weights: weights, quantizeFFN: false, preciseAttention: true, fusedOperations: true, compileGraph: true)
     let eager = try NeuralRenderingGlobalStage(weights: weights, quantizeFFN: false, preciseAttention: true, fusedOperations: true, compileGraph: false)

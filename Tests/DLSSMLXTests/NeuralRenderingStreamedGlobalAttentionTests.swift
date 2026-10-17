@@ -54,9 +54,7 @@ final class NeuralRenderingStreamedGlobalAttentionTests: XCTestCase {
   }
 
   func testRealGlobalStageParityAndTimingWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("Set MLXDLSS_LOGICAL_WEIGHTS for real global-stage parity")
-    }
+    let path = try htLogicalWeightsPath("Set MLXDLSS_LOGICAL_WEIGHTS for real global-stage parity")
     let weights = ValidatedWeights(arrays: try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)).cast(to: .float16)
     let reference = try NeuralRenderingGlobalStage(weights: weights)
     let fused = try NeuralRenderingGlobalStage(weights: weights, fusedOperations: true, compileGraph: true)

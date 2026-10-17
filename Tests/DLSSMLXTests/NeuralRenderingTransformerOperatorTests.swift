@@ -901,9 +901,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredPostBlockExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let post = try NeuralRenderingPostBlock(
       weights: ValidatedWeights(arrays: arrays)
@@ -925,9 +923,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredDecoderInputExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let bridge = try NeuralRenderingDecoderInput(
       weights: ValidatedWeights(arrays: arrays)
@@ -950,9 +946,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredFirstDecoderStageExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let stage = try NeuralRenderingFirstDecoderStage(
       weights: ValidatedWeights(arrays: arrays)
@@ -974,9 +968,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredDecoderExecutesThroughBlockSixtyNine() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let decoder = try NeuralRenderingDecoder(
       weights: ValidatedWeights(arrays: arrays)
@@ -1008,9 +1000,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredSplitBlockExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let block = try NeuralRenderingSplitWindowBlock(
       weights: ValidatedWeights(arrays: arrays),
@@ -1029,9 +1019,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredSplitEncoderStageExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let stage = try NeuralRenderingSplitEncoderStage(
       weights: ValidatedWeights(arrays: arrays)
@@ -1051,9 +1039,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredGlobalStageExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let stage = try NeuralRenderingGlobalStage(
       weights: ValidatedWeights(arrays: arrays)
@@ -1228,9 +1214,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredTrunkExecutesBlocksZeroThroughThirtyEight() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let trunk = try NeuralRenderingTrunk(
       weights: ValidatedWeights(arrays: arrays)
@@ -1372,9 +1356,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredCompiledWindowSequenceMatchesEagerBlocks() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let weights = ValidatedWeights(arrays: arrays)
     let eagerBlocks = try (1...3).map {
@@ -1487,9 +1469,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredFP16StageBoundariesStayFinite() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let loaded = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let weights = ValidatedWeights(arrays: loaded).cast(to: .float16)
     let input = MLXArray(
@@ -1667,9 +1647,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredBlockFiveExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let block = try NeuralRenderingWindowBlock(
       weights: ValidatedWeights(arrays: arrays),
@@ -1725,9 +1703,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredEncoderStemExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let stem = try NeuralRenderingEncoderStem(
       weights: ValidatedWeights(arrays: arrays)
@@ -1777,9 +1753,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredFirstEncoderStageExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let stage = try NeuralRenderingFirstEncoderStage(
       weights: ValidatedWeights(arrays: arrays)
@@ -1800,9 +1774,7 @@ final class NeuralRenderingTransformerOperatorTests: XCTestCase {
   }
 
   func testExternalRecoveredEncoderExecutesWhenConfigured() throws {
-    guard let path = ProcessInfo.processInfo.environment["MLXDLSS_LOGICAL_WEIGHTS"] else {
-      throw XCTSkip("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
-    }
+    let path = try htLogicalWeightsPath("set MLXDLSS_LOGICAL_WEIGHTS to run the local recovered-weight probe")
     let arrays = try loadArrays(url: URL(fileURLWithPath: path), stream: .cpu)
     let encoder = try NeuralRenderingEncoder(
       weights: ValidatedWeights(arrays: arrays)

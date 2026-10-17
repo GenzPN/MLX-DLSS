@@ -10,7 +10,7 @@ public enum NeuralRenderingNetworkGeometryError: Error, Equatable, Sendable {
   )
 }
 
-/// Output-to-network geometry surrounding the recovered 71-block graph.
+/// Output-to-network geometry surrounding the recovered graph (71-block HT or 31-block small).
 public struct NeuralRenderingNetworkGeometry: Equatable, Sendable {
   public static let minimumExtent = 320
   public static let extentMultiple = 64
