@@ -15,7 +15,10 @@ if [[ ${#tests[@]} -eq 0 ]]; then
   tests=(testFusedWindowBlock1h testFusedWindowAttentionCore testGlobalAttentionV2IsBitExactAndTiming testWholeFrameAB)
 fi
 export MLXDLSS_PERF_SPIKE=1
-export MLXDLSS_LOGICAL_WEIGHTS="${MLXDLSS_LOGICAL_WEIGHTS:-$project_root/weights/dlssnr-weights-logical.safetensors}"
+# The small network (the 310.9.16 default) unless MLXDLSS_LOGICAL_WEIGHTS names another; HT if small is absent.
+default_weights="$project_root/weights/dlssnr-small-weights-logical.safetensors"
+[[ -f "$default_weights" ]] || default_weights="$project_root/weights/dlssnr-weights-logical.safetensors"
+export MLXDLSS_LOGICAL_WEIGHTS="${MLXDLSS_LOGICAL_WEIGHTS:-$default_weights}"
 filter="PerfSpikeKernelTimingTests/($(IFS='|'; echo "${tests[*]}"))"
 if [[ $sleep_display -eq 1 ]]; then
   caffeinate -s -w $$ &

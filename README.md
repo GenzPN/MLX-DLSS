@@ -74,8 +74,13 @@ mlxdlss-weights extract-fg nvngx_dlssg.dll weights/framegen.safetensors
 Outputs: `NeuralRendering.dlssmodel` (HT) and, from 310.9.16,
 `NeuralRendering-Small.dlssmodel` for Metal; the matching
 `dlssnr-weights-logical.safetensors` and `dlssnr-small-weights-logical.safetensors`
-for PyTorch; `framegen.safetensors` for either backend. The app selects the
-small network when it finds both and shows an HT/Small switch. The
+for PyTorch; `framegen.safetensors` for either backend.
+
+The small network, the newest and about twice as fast, is the default:
+`mlxdlss-weights extract` takes it when the DLL carries it, the app selects it
+and shows an HT/Small switch (a saved HT package moves to the small one beside
+it until you pick a network yourself), and `scripts/bench.sh` and
+`scripts/verify-local.sh` use it first. The
 [small network](docs/recovery-notes.md#the-small-fp8-network) has no NVIDIA
 parity measurement yet.
 
@@ -84,8 +89,8 @@ parity measurement yet.
 The app build also creates `.build/release/mlxdlss`:
 
 ```sh
-.build/release/mlxdlss process-image in.png --output out.png --model weights/NeuralRendering.dlssmodel
-.build/release/mlxdlss process-video in.mp4 --output out.mp4 --model weights/NeuralRendering.dlssmodel
+.build/release/mlxdlss process-image in.png --output out.png --model weights/NeuralRendering-Small.dlssmodel
+.build/release/mlxdlss process-video in.mp4 --output out.mp4 --model weights/NeuralRendering-Small.dlssmodel
 .build/release/mlxdlss process-video in.mp4 --output out.mp4 --framegen-weights weights/framegen.safetensors --factor 2
 .build/release/mlxdlss process-video in.mp4 --output out.mp4 --sr-model weights/dlss-sr.srmodel
 ```

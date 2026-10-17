@@ -1,6 +1,6 @@
 """``mlxdlss-weights``: bring-your-own-DLL tooling.
 
-    mlxdlss-weights extract  nvngx_dlssnr.dll packed.safetensors [--resource WEIGHTS_CC_SMALL_FP8]  # packed intermediate of one network
+    mlxdlss-weights extract  nvngx_dlssnr.dll packed.safetensors [--resource WEIGHTS_HT]  # packed intermediate of one network (default: the newest)
     mlxdlss-weights decode   packed.safetensors logical.safetensors  # logical tensors for PyTorch (and every converter)
     mlxdlss-weights mlx      logical.safetensors Model.dlssmodel      # MLX-DLSS MLX package (Swift mlxdlss)
     mlxdlss-weights coreml   logical.safetensors Model.mlpackage --width W --height H   # fixed-shape Core ML (needs coremltools)
@@ -12,6 +12,8 @@ game install or Streamline SDK package (bin/x64/nvngx_dlssnr.dll). Supported
 builds are identified by their SHA-256: FileVersion 310.8.0.0 carries the
 71-block HT network (``WEIGHTS_HT``); 310.9.16.0 adds the 31-block small FP8
 network (``WEIGHTS_CC_SMALL_FP8``, its shipping default preset) and keeps HT.
+The newest network is the default: ``extract`` takes the small network when the
+DLL carries it, and ``all`` writes it first.
 """
 from __future__ import annotations
 
@@ -35,10 +37,10 @@ KNOWN_DLL_SHA256 = {
     "2bc19bc09a7b89dd44f73e2ac0108fcc586e2154bdd0830f242f4f040e28789f": "supported nvngx_dlssnr.dll (FileVersion 310.9.16.0: HT + small FP8)",
 }
 
-# Output names per network resource; the small network is the 310.9.16 shipping default.
+# Output names per network resource, newest first; the small network is the 310.9.16 shipping default.
 NETWORK_OUTPUTS = {
-    "WEIGHTS_HT": ("dlssnr-weights", ""),
     "WEIGHTS_CC_SMALL_FP8": ("dlssnr-small-weights", "-Small"),
+    "WEIGHTS_HT": ("dlssnr-weights", ""),
 }
 
 
@@ -119,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     extract = commands.add_parser("extract", help="DLL -> packed intermediate safetensors")
     extract.add_argument("dll", type=pathlib.Path); extract.add_argument("destination", type=pathlib.Path)
-    extract.add_argument("--resource", default=None, help="network resource: WEIGHTS_HT (default) or WEIGHTS_CC_SMALL_FP8 (310.9.16+)")
+    extract.add_argument("--resource", default=None, help="network resource: WEIGHTS_CC_SMALL_FP8 or WEIGHTS_HT; default: the newest the DLL carries (small from 310.9.16)")
     extract.add_argument("--resource-blob", action="store_true", help="source is an already extracted resource")
     decode = commands.add_parser("decode", help="packed intermediate -> logical safetensors")
     decode.add_argument("packed", type=pathlib.Path); decode.add_argument("destination", type=pathlib.Path)

@@ -9,12 +9,12 @@ python -m pip install '.[web,video]' # web UI and default temporal video (OpenCV
 python -m pip install '.[coreml]'  # optional Core ML conversion (macOS, Linux)
 
 mlxdlss-weights all nvngx_dlssnr.dll weights/ --coreml 320x320   # your own DLL -> packed, logical, MLX, Core ML
-mlxdlss-torch run --weights weights/dlssnr-weights-logical.safetensors --input in.png --output out.png
+mlxdlss-torch run --weights weights/dlssnr-small-weights-logical.safetensors --input in.png --output out.png
 ```
 
 ```python
 from mlxdlss import NeuralRenderingPipeline, TemporalSession, FrameGenerator
-pipeline = NeuralRenderingPipeline.from_safetensors("weights/dlssnr-weights-logical.safetensors", device="auto")
+pipeline = NeuralRenderingPipeline.from_safetensors("weights/dlssnr-small-weights-logical.safetensors", device="auto")
 result = pipeline.enhance(image_float32_hwc, profile="standard", processing_scale=2, detail_strength=2)
 session = TemporalSession(pipeline)
 frame = session.process(image_float32_hwc)  # optional motion=engine_uv_offsets
@@ -39,8 +39,8 @@ jobs retain their explicit settings. See the [rendering controls](../README.md#c
 The portable video CLI requires `ffmpeg` and `ffprobe` in `PATH`:
 
 ```sh
-mlxdlss-video convert in.mp4 out.mp4 --weights weights/dlssnr-weights-logical.safetensors --device cuda
-mlxdlss-video convert in.mp4 out.mp4 --backend mlxdlss --model weights/NeuralRendering.dlssmodel --encode-args "-c:v libx265 -crf 20"
+mlxdlss-video convert in.mp4 out.mp4 --weights weights/dlssnr-small-weights-logical.safetensors --device cuda
+mlxdlss-video convert in.mp4 out.mp4 --backend mlxdlss --model weights/NeuralRendering-Small.dlssmodel --encode-args "-c:v libx265 -crf 20"
 mlxdlss-video framegen in.mp4 out.mp4 --weights weights/framegen.safetensors --backend mlxdlss
 mlxdlss-video framegen in.mp4 slow.mp4 --weights weights/framegen.safetensors --mode slowmo --factor 4 --audio stretch
 mlxdlss-web

@@ -68,6 +68,10 @@ final class AppModel {
   private var worker: Task<Void, Never>?
   private let processor = NativeMediaProcessor()
 
+  /// Set once the user picks a rendering package or network; until then the
+  /// small network wins wherever its package sits beside the saved one.
+  private static let modelChosenKey = "renderingModelChosen"
+
   init() {
     let defaults = UserDefaults.standard
     // The small network is the shipping default of nvngx_dlssnr.dll 310.9.16.
@@ -79,6 +83,11 @@ final class AppModel {
     dlssSuperResolutionPath = defaults.string(forKey: "dlssSuperResolutionModel") ?? Self.locateWeight("dlss-sr.srmodel")
     outputDirectory = defaults.string(forKey: "outputDirectory") ?? FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("MLX-DLSS/outputs").path
+    if !defaults.bool(forKey: Self.modelChosenKey), renderingNetwork == .ht,
+      let small = networkPath(.small), FileManager.default.fileExists(atPath: small)
+    {
+      modelPath = small
+    }
   }
 
   var selectedJob: MediaJob? { jobs.first { $0.id == selection } }
@@ -155,7 +164,10 @@ final class AppModel {
     panel.message = generation ? "Choose frame-generation .safetensors weights" : "Choose a neural-rendering .dlssmodel package"
     if panel.runModal() == .OK, let url = panel.url {
       if generation { generationPath = url.path }
-      else { modelPath = url.path }
+      else {
+        modelPath = url.path
+        UserDefaults.standard.set(true, forKey: Self.modelChosenKey)
+      }
       savePaths()
     }
   }
@@ -177,6 +189,7 @@ final class AppModel {
     set {
       guard let path = networkPath(newValue), path != modelPath else { return }
       modelPath = path
+      UserDefaults.standard.set(true, forKey: Self.modelChosenKey)
       savePaths()
     }
   }

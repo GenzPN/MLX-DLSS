@@ -22,6 +22,7 @@ import os
 import pathlib
 import struct
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy
@@ -155,6 +156,12 @@ def list_rcdata_resources(data: bytes) -> list[str]:
     names: list[str] = []
     extract_pe_resource(data, None, _names=names)
     return names
+
+
+def newest_resource(names: Iterable[str]) -> str:
+    """The newest known network among ``names``: the small network from 310.9.16, else HT."""
+    present = set(names)
+    return next((name for name in RESOURCE_NAMES if name in present), RESOURCE_NAME)
 
 
 def extract_pe_resource(data: bytes, name: str | None = RESOURCE_NAME, *, _names: list[str] | None = None) -> bytes:
@@ -474,11 +481,13 @@ def pe_file_version(data: bytes) -> str | None:
 def extract_dll(
     dll_path: pathlib.Path,
     destination: pathlib.Path,
-    resource_name: str = RESOURCE_NAME,
+    resource_name: str | None = None,
 ) -> dict[str, object]:
+    """Extract ``resource_name``, by default the newest network the DLL carries."""
     dll_path = pathlib.Path(dll_path)
     destination = pathlib.Path(destination)
     dll = dll_path.read_bytes()
+    resource_name = resource_name or newest_resource(list_rcdata_resources(dll))
     file_version = pe_file_version(dll)
     resource = extract_pe_resource(dll, resource_name)
     tensors = parse_weight_map(resource)
@@ -511,8 +520,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("destination", type=pathlib.Path)
     parser.add_argument(
         "--resource",
-        default=RESOURCE_NAME,
-        help=f"RCDATA resource to extract ({', '.join(RESOURCE_NAMES)}; default {RESOURCE_NAME})",
+        default=None,
+        help=f"RCDATA resource to extract ({', '.join(RESOURCE_NAMES)}); default: the newest "
+        f"the DLL carries, {SMALL_RESOURCE_NAME} from 310.9.16 ({RESOURCE_NAME} with --resource-blob)",
     )
     parser.add_argument(
         "--resource-blob",
@@ -521,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
     summary = (
-        extract_resource_blob(arguments.source, arguments.destination, arguments.resource)
+        extract_resource_blob(arguments.source, arguments.destination, arguments.resource or RESOURCE_NAME)
         if arguments.resource_blob
         else extract_dll(arguments.source, arguments.destination, arguments.resource)
     )

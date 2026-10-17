@@ -50,6 +50,13 @@ class VersionAndInspectTests(unittest.TestCase):
         self.assertEqual(pe_file_version(blob), "310,8,0,0")
         self.assertIsNone(pe_file_version(b"no version info here"))
 
+    def test_extraction_defaults_to_the_newest_network(self):
+        from mlxdlss.tools.extract_dlssnr_weights import newest_resource
+
+        self.assertEqual(newest_resource(["WEIGHTS_HT", "WEIGHTS_CC_SMALL_FP8", "OTHER"]), "WEIGHTS_CC_SMALL_FP8")
+        self.assertEqual(newest_resource(["WEIGHTS_HT"]), "WEIGHTS_HT")
+        self.assertEqual(newest_resource([]), "WEIGHTS_HT")
+
     def test_inspect_lists_packed_tensors(self):
         import io
         from contextlib import redirect_stdout
