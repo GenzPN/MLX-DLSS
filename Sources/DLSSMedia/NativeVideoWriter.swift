@@ -83,11 +83,13 @@ actor NativeVideoWriter {
     try await audio.append(sample)
   }
 
+  /// Closes the video track. The session ends in `finish(at:)`, after the audio
+  /// task has appended the samples before `time`: AVAssetWriter refuses any
+  /// append once the session has ended.
   func finishVideo(at time: CMTime) {
     guard !complete, endTime == nil else { return }
     endTime = time
     video.finish()
-    writer.endSession(atSourceTime: time)
   }
 
   func finishAudio() {
@@ -100,6 +102,7 @@ actor NativeVideoWriter {
     guard !complete else { throw MLXMediaError("Encoder is already closed") }
     finishVideo(at: time)
     finishAudio()
+    writer.endSession(atSourceTime: endTime ?? time)
     await writer.finishWriting()
     complete = true
     guard writer.status == .completed else { throw writer.error ?? MLXMediaError("Cannot finish native video output") }
