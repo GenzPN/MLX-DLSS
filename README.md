@@ -18,6 +18,12 @@ weights are included or downloaded.
 
 [Frame-generation comparison](https://github.com/user-attachments/assets/ce94f426-910b-4556-bdf9-662cbdd5933a)
 
+## Changelog
+
+- **2026-10-17**: supports the 2× faster DLSS 5 neural rendering model from
+  [NVIDIA's October update](https://www.nvidia.com/en-us/geforce/news/dlss-5-faster-ai-model-hogwarts-legacy-rtx-spark-laptops/)
+  (the small network; extract it from `nvngx_dlssnr.dll` 310.9.16.0).
+
 ## Choose a mode
 
 | Mode | Runtime | Preview |
