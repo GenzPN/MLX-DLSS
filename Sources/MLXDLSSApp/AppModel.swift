@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 
 @MainActor @Observable
 final class MediaJob: Identifiable {
-  enum State: String { case queued = "Queued", running = "Processing", complete = "Complete", cancelled = "Cancelled", failed = "Failed" }
+  enum State: String { case queued = "Queued", running = "Processing", complete = "Done", cancelled = "Cancelled", failed = "Failed" }
   let id = UUID()
   let input: URL
   let isVideo: Bool
@@ -16,11 +16,33 @@ final class MediaJob: Identifiable {
   var progress: MediaProgress?
   var result: MediaProcessingResult?
   var error: String?
+  /// Loaded from the file after import; nil until then or when unreadable.
+  var info: MediaInfo?
+  var thumbnail: CGImage?
+  var filmstrip: [CGImage] = []
+  /// The timeline position last shown for this item.
+  var viewedTime: Double?
 
   init(input: URL) {
     self.input = input
     isVideo = UTType(filenameExtension: input.pathExtension)?.conforms(to: .movie) == true
   }
+
+  var name: String { input.lastPathComponent }
+  var isFinished: Bool { state != .queued && state != .running }
+
+  /// Remaining export time from the current rate, once a few frames have passed.
+  var remainingSeconds: Double? {
+    guard state == .running, let progress, progress.inputFrames >= 4, progress.fraction > 0.01 else { return nil }
+    return progress.elapsedSeconds * (1 - progress.fraction) / progress.fraction
+  }
+}
+
+/// A source frame decoded without the model, shown while a rendered preview is pending.
+struct SourceFrame {
+  let job: UUID
+  let time: Double
+  let image: CGImage
 }
 
 @available(macOS 26.0, *)
@@ -28,7 +50,13 @@ final class MediaJob: Identifiable {
 final class AppModel {
   var jobs: [MediaJob] = []
   var selection: UUID? {
-    didSet { if selection != oldValue { previewTime = 0; preview = nil; previewError = nil } }
+    didSet {
+      guard selection != oldValue else { return }
+      previewTime = selectedJob?.viewedTime ?? 0
+      preview = nil
+      previewTimeRendered = nil
+      previewError = nil
+    }
   }
   var isRunning = false
   var alert: String?
@@ -57,16 +85,27 @@ final class AppModel {
   var codec: MediaVideoCodec = .h264
   var startFrame = 0
   var frameLimit = 0
-  var previewTime: Double = 0
+  var previewTime: Double = 0 {
+    didSet { selectedJob?.viewedTime = previewTime }
+  }
   var preview: MediaPreviewResult?
+  /// The requested time `preview` was rendered for; the decoder snaps it to a frame.
+  private(set) var previewTimeRendered: Double?
   var previewError: String?
   var previewRefreshing = false
-  private var previewSession: NativeMediaPreview?
-  private var previewWorker: Task<Void, Never>?
-  private var pendingPreview: (revision: UInt64, request: MediaPreviewRequest)?
-  private var previewRevision: UInt64 = 0
-  private var worker: Task<Void, Never>?
-  private let processor = NativeMediaProcessor()
+  /// The selected source at `previewTime`, decoded directly; replaced by `preview` once it is current.
+  var sourceFrame: SourceFrame?
+  @ObservationIgnored private var previewSession: NativeMediaPreview?
+  @ObservationIgnored private var previewWorker: Task<Void, Never>?
+  @ObservationIgnored private var pendingPreview: (revision: UInt64, request: MediaPreviewRequest)?
+  @ObservationIgnored private var previewRevision: UInt64 = 0
+  @ObservationIgnored private var scheduledRequest: MediaPreviewRequest?
+  @ObservationIgnored private var renderedRequest: MediaPreviewRequest?
+  @ObservationIgnored private var sourceWorker: Task<Void, Never>?
+  @ObservationIgnored private var pendingSource: (job: MediaJob, time: Double)?
+  @ObservationIgnored private var worker: Task<Void, Never>?
+  @ObservationIgnored private let processor = NativeMediaProcessor()
+  @ObservationIgnored private let scrubber = MediaLibrary.Scrubber()
 
   /// Set once the user picks a rendering package or network; until then the
   /// small network wins wherever its package sits beside the saved one.
@@ -88,10 +127,13 @@ final class AppModel {
     {
       modelPath = small
     }
+    observePreviewInputs()
   }
 
   var selectedJob: MediaJob? { jobs.first { $0.id == selection } }
   var hasQueuedJobs: Bool { jobs.contains { $0.state == .queued } }
+  var queuedCount: Int { jobs.count { $0.state == .queued } }
+  var hasFinishedJobs: Bool { jobs.contains(where: \.isFinished) }
   var usesDLSS: Bool { selectedJob?.isVideo != false && videoUpscaling == "dlss" }
   var upscalingPath: String { usesDLSS ? dlssSuperResolutionPath : superResolutionPath }
 
@@ -101,8 +143,27 @@ final class AppModel {
       options: options(forPreview: true, isVideo: job.isVideo))
   }
 
-  func schedulePreview(_ request: MediaPreviewRequest?) {
+  /// True while the shown preview belongs to another frame than the one selected.
+  var previewIsStale: Bool {
+    guard preview != nil, let job = selectedJob else { return true }
+    return job.isVideo && previewTimeRendered != previewTime
+  }
+
+  // MARK: Preview
+
+  /// Re-arms itself on every change of a property the preview request reads, so
+  /// slider drags never re-evaluate the views that only display the result.
+  private func observePreviewInputs() {
+    let request = withObservationTracking { previewRequest } onChange: { [weak self] in
+      Task { @MainActor in self?.observePreviewInputs() }
+    }
+    if request != scheduledRequest { schedulePreview(request) }
+    requestSourceFrame()
+  }
+
+  private func schedulePreview(_ request: MediaPreviewRequest?) {
     previewRevision &+= 1
+    scheduledRequest = request
     guard let request else {
       pendingPreview = nil
       previewRefreshing = false
@@ -114,10 +175,13 @@ final class AppModel {
     guard previewWorker == nil else { return }
     previewWorker = Task {
       defer { previewWorker = nil; previewRefreshing = false }
-      while pendingPreview != nil {
-        // Read the latest snapshot after the debounce. Changes made during an
-        // inference replace the pending request; they never queue extra renders.
-        try? await Task.sleep(for: .milliseconds(180))
+      while let peek = pendingPreview {
+        // Live controls re-compose the retained frame in milliseconds, so they
+        // follow a slider closely; anything that re-runs the network waits for
+        // the input to settle. Changes made during an inference replace the
+        // pending request; they never queue extra renders.
+        let live = renderedRequest.map { Self.liveKey($0) == Self.liveKey(peek.request) } ?? false
+        try? await Task.sleep(for: .milliseconds(live ? 16 : 120))
         guard let next = pendingPreview else { break }
         pendingPreview = nil
         do {
@@ -129,13 +193,56 @@ final class AppModel {
           }
           if previewSession == nil { previewSession = try NativeMediaPreview() }
           let result = try await previewSession!.render(next.request)
-          if next.revision == previewRevision { preview = result; previewError = nil }
+          renderedRequest = next.request
+          if next.revision == previewRevision {
+            preview = result
+            previewTimeRendered = next.request.time
+            previewError = nil
+          }
         } catch {
+          renderedRequest = nil
           if next.revision == previewRevision { previewError = error.localizedDescription }
         }
       }
     }
   }
+
+  /// The request with the controls that `NativeMediaPreview` re-applies without the network.
+  private static func liveKey(_ request: MediaPreviewRequest) -> MediaPreviewRequest {
+    var options = request.options
+    options.intensity = 1
+    options.detailStrength = 1
+    options.colourStrength = 1
+    options.detailRadius = 4
+    return MediaPreviewRequest(input: request.input, isVideo: request.isVideo, time: request.time, options: options)
+  }
+
+  private func requestSourceFrame() {
+    guard let job = selectedJob else { sourceFrame = nil; pendingSource = nil; return }
+    let time = job.isVideo ? previewTime : 0
+    if let sourceFrame, sourceFrame.job == job.id, sourceFrame.time == time { return }
+    pendingSource = (job, time)
+    guard sourceWorker == nil else { return }
+    sourceWorker = Task {
+      defer { sourceWorker = nil }
+      while let next = pendingSource {
+        pendingSource = nil
+        let image = next.job.isVideo
+          ? await scrubber.frame(next.job.input, time: next.time, maxPixels: 2048)
+          : await MediaLibrary.frame(next.job.input, isVideo: false, maxPixels: 2048)
+        if let image { sourceFrame = SourceFrame(job: next.job.id, time: next.time, image: image) }
+      }
+    }
+  }
+
+  func step(frames: Int) {
+    guard let job = selectedJob, job.isVideo, let preview else { return }
+    let last = max(0, preview.duration - preview.frameInterval)
+    let frame = (previewTime / preview.frameInterval).rounded() + Double(frames)
+    previewTime = min(last, max(0, frame * preview.frameInterval))
+  }
+
+  // MARK: Queue
 
   func addFiles(_ urls: [URL]) {
     for url in urls {
@@ -143,9 +250,34 @@ final class AppModel {
         alert = "Unsupported media file: \(url.lastPathComponent)"
         continue
       }
+      if let queued = jobs.first(where: { $0.input == url && $0.state == .queued }) {
+        selection = queued.id
+        continue
+      }
       let job = MediaJob(input: url)
       jobs.append(job)
       selection = job.id
+      Task { await load(job) }
+    }
+  }
+
+  private func load(_ job: MediaJob) async {
+    let url = job.input, isVideo = job.isVideo
+    let info = await MediaLibrary.info(url, isVideo: isVideo)
+    job.info = info
+    var poster = 0.0
+    if let duration = info?.duration, duration > 0 {
+      // Open on a frame with history behind it rather than on a fade-in.
+      let interval = 1 / (info?.frameRate ?? 30)
+      poster = ((duration * 0.15) / interval).rounded() * interval
+      if (job.viewedTime ?? 0) == 0 {
+        job.viewedTime = poster
+        if selection == job.id, previewTime == 0 { previewTime = poster }
+      }
+    }
+    job.thumbnail = await MediaLibrary.frame(url, isVideo: isVideo, time: poster, maxPixels: 192)
+    if isVideo, let duration = info?.duration, duration > 0 {
+      job.filmstrip = await MediaLibrary.filmstrip(url, duration: duration, count: 14, maxPixels: 192)
     }
   }
 
@@ -157,70 +289,10 @@ final class AppModel {
     if panel.runModal() == .OK { addFiles(panel.urls) }
   }
 
-  func chooseModel(generation: Bool) {
-    let panel = NSOpenPanel()
-    panel.canChooseDirectories = !generation
-    panel.canChooseFiles = true
-    panel.message = generation ? "Choose frame-generation .safetensors weights" : "Choose a neural-rendering .dlssmodel package"
-    if panel.runModal() == .OK, let url = panel.url {
-      if generation { generationPath = url.path }
-      else {
-        modelPath = url.path
-        UserDefaults.standard.set(true, forKey: Self.modelChosenKey)
-      }
-      savePaths()
-    }
-  }
-
-  /// The two networks of `nvngx_dlssnr.dll` 310.9.16, which `mlxdlss-weights all`
-  /// writes side by side as `NAME.dlssmodel` and `NAME-Small.dlssmodel`.
-  enum RenderingNetwork: String, CaseIterable, Identifiable {
-    case small = "Small", ht = "HT"
-    var id: Self { self }
-  }
-
-  /// Networks whose package sits beside the chosen one.
-  var renderingNetworks: [RenderingNetwork] {
-    RenderingNetwork.allCases.filter { networkPath($0).map(FileManager.default.fileExists(atPath:)) ?? false }
-  }
-
-  var renderingNetwork: RenderingNetwork {
-    get { URL(fileURLWithPath: modelPath).deletingPathExtension().lastPathComponent.hasSuffix("-Small") ? .small : .ht }
-    set {
-      guard let path = networkPath(newValue), path != modelPath else { return }
-      modelPath = path
-      UserDefaults.standard.set(true, forKey: Self.modelChosenKey)
-      savePaths()
-    }
-  }
-
-  private func networkPath(_ network: RenderingNetwork) -> String? {
-    guard !modelPath.isEmpty else { return nil }
-    let url = URL(fileURLWithPath: modelPath)
-    var name = url.deletingPathExtension().lastPathComponent
-    if name.hasSuffix("-Small") { name.removeLast("-Small".count) }
-    let file = name + (network == .small ? "-Small" : "") + ".dlssmodel"
-    return url.deletingLastPathComponent().appendingPathComponent(file).path
-  }
-
-  func chooseOutputDirectory() {
-    let panel = NSOpenPanel()
-    panel.canChooseDirectories = true
-    panel.canChooseFiles = false
-    panel.canCreateDirectories = true
-    if panel.runModal() == .OK, let url = panel.url { outputDirectory = url.path; savePaths() }
-  }
-
-  func chooseSuperResolutionWeights() {
-    let panel = NSOpenPanel()
-    panel.canChooseDirectories = usesDLSS
-    panel.canChooseFiles = !usesDLSS
-    panel.message = usesDLSS ? "Choose a DLSS SR .srmodel package" : "Choose VSR 2× .safetensors weights"
-    if panel.runModal() == .OK, let url = panel.url {
-      if usesDLSS { dlssSuperResolutionPath = url.path }
-      else { superResolutionPath = url.path }
-      savePaths()
-    }
+  func remove(_ job: MediaJob) {
+    guard job.state != .running else { return }
+    jobs.removeAll { $0.id == job.id }
+    if selection == job.id { selection = jobs.last?.id }
   }
 
   func runQueue() {
@@ -239,7 +311,6 @@ final class AppModel {
     savePaths()
     let directory = URL(fileURLWithPath: outputDirectory)
     isRunning = true
-    schedulePreview(nil)
     worker = Task {
       defer { isRunning = false; worker = nil }
       // Let an already submitted preview finish before export claims the GPU.
@@ -248,6 +319,7 @@ final class AppModel {
         if Task.isCancelled { break }
         job.state = .running
         job.error = nil
+        job.progress = nil
         selection = job.id
         let options = optionsByKind[job.isVideo]!
         do {
@@ -280,8 +352,25 @@ final class AppModel {
   }
 
   func cancel() { worker?.cancel() }
-  func retry(_ job: MediaJob) { job.state = .queued; job.error = nil; job.progress = nil }
-  func removeFinished() { jobs.removeAll { $0.state != .running && $0.state != .queued } }
+  func retry(_ job: MediaJob) { job.state = .queued; job.error = nil; job.progress = nil; job.result = nil }
+  func removeFinished() {
+    jobs.removeAll(where: \.isFinished)
+    if selectedJob == nil { selection = jobs.last?.id }
+  }
+
+  // MARK: Controls
+
+  var adjustmentsAreNeutral: Bool {
+    intensity == 1 && detailStrength == 1 && colourStrength == 1 && detailRadius == 4 && processingScale == 1
+  }
+
+  func resetAdjustments() {
+    intensity = 1
+    detailStrength = 1
+    colourStrength = 1
+    detailRadius = 4
+    processingScale = 1
+  }
 
   private func processingOptions(isVideo: Bool) throws -> MediaProcessingOptions {
     let options = options(forPreview: false, isVideo: isVideo)
@@ -320,6 +409,107 @@ final class AppModel {
       options.frameLimit = frameLimit > 0 ? frameLimit : nil
     }
     return options
+  }
+
+  // MARK: Models
+
+  enum ModelKind: CaseIterable, Identifiable {
+    case rendering, generation, dlssSuperResolution, superResolution
+    var id: Self { self }
+
+    var title: String {
+      switch self {
+      case .rendering: "Neural rendering"
+      case .generation: "Frame generation"
+      case .dlssSuperResolution: "DLSS Super Resolution"
+      case .superResolution: "RTX Video Super Resolution"
+      }
+    }
+
+    var fileKind: String {
+      switch self {
+      case .rendering: ".dlssmodel package"
+      case .generation, .superResolution: ".safetensors weights"
+      case .dlssSuperResolution: ".srmodel package"
+      }
+    }
+
+    var isPackage: Bool { self == .rendering || self == .dlssSuperResolution }
+  }
+
+  func path(_ kind: ModelKind) -> String {
+    switch kind {
+    case .rendering: modelPath
+    case .generation: generationPath
+    case .dlssSuperResolution: dlssSuperResolutionPath
+    case .superResolution: superResolutionPath
+    }
+  }
+
+  func isAvailable(_ kind: ModelKind) -> Bool {
+    let path = path(kind)
+    return !path.isEmpty && FileManager.default.fileExists(atPath: path)
+  }
+
+  func choose(_ kind: ModelKind) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = kind.isPackage
+    panel.canChooseFiles = true
+    panel.treatsFilePackagesAsDirectories = false
+    panel.message = "Choose the \(kind.title.lowercased()) \(kind.fileKind)"
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    switch kind {
+    case .rendering:
+      modelPath = url.path
+      UserDefaults.standard.set(true, forKey: Self.modelChosenKey)
+    case .generation: generationPath = url.path
+    case .dlssSuperResolution: dlssSuperResolutionPath = url.path
+    case .superResolution: superResolutionPath = url.path
+    }
+    savePaths()
+  }
+
+  /// The upscaler the selected media uses: DLSS SR for video unless RTX VSR is chosen.
+  var upscalingKind: ModelKind { usesDLSS ? .dlssSuperResolution : .superResolution }
+
+  /// The two networks of `nvngx_dlssnr.dll` 310.9.16, which `mlxdlss-weights all`
+  /// writes side by side as `NAME.dlssmodel` and `NAME-Small.dlssmodel`.
+  enum RenderingNetwork: String, CaseIterable, Identifiable {
+    case small = "Small", ht = "HT"
+    var id: Self { self }
+  }
+
+  /// Networks whose package sits beside the chosen one.
+  var renderingNetworks: [RenderingNetwork] {
+    RenderingNetwork.allCases.filter { networkPath($0).map(FileManager.default.fileExists(atPath:)) ?? false }
+  }
+
+  var renderingNetwork: RenderingNetwork {
+    get { URL(fileURLWithPath: modelPath).deletingPathExtension().lastPathComponent.hasSuffix("-Small") ? .small : .ht }
+    set {
+      guard let path = networkPath(newValue), path != modelPath else { return }
+      modelPath = path
+      UserDefaults.standard.set(true, forKey: Self.modelChosenKey)
+      savePaths()
+    }
+  }
+
+  private func networkPath(_ network: RenderingNetwork) -> String? {
+    guard !modelPath.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: modelPath)
+    var name = url.deletingPathExtension().lastPathComponent
+    if name.hasSuffix("-Small") { name.removeLast("-Small".count) }
+    let file = name + (network == .small ? "-Small" : "") + ".dlssmodel"
+    return url.deletingLastPathComponent().appendingPathComponent(file).path
+  }
+
+  func chooseOutputDirectory() {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = true
+    panel.directoryURL = URL(fileURLWithPath: outputDirectory)
+    if panel.runModal() == .OK, let url = panel.url { outputDirectory = url.path; savePaths() }
   }
 
   private func savePaths() {

@@ -22,7 +22,7 @@ weights are included or downloaded.
 
 | Mode | Runtime | Preview |
 | --- | --- | --- |
-| macOS app | Swift, Metal, AVFoundation | Live settings; select a video frame on the timeline |
+| macOS app | Swift, Metal, AVFoundation | Live settings; split comparison; frame stepping on a filmstrip |
 | Web UI | Python, NiceGUI; native Metal media or PyTorch/FFmpeg | Live settings and video timeline |
 | CLI / Python API | Native Metal or PyTorch | File output |
 
@@ -39,9 +39,17 @@ scripts/build-native-app.sh
 open '.build/MLX DLSS.app'
 ```
 
-Choose your [prepared weights](#weights), import media, adjust settings and
-start the queue. The app includes its CLI and Metal library. It needs no Python
-or FFmpeg at runtime.
+Set your [prepared weights](#weights) once in **Settings › Models** (⌘,).
+Drop images or video on the window, compare the rendered frame with the
+original and process the queue (⌘↩). The app includes its CLI and Metal library.
+It needs no Python or FFmpeg at runtime.
+
+The canvas has four compare modes: Original, Split, Rendered and Side by Side
+(⌘1–⌘4). Drag the split handle to move the divider; hold M to see the original.
+Pinch, ⌘-scroll or double-click to zoom; ⌘0 shows actual pixels and ⌘9 fits
+the frame. On video, drag along the filmstrip or press ←/→ to step one frame:
+the decoded frame shows at once and the rendered frame follows. The inspector
+lists the stages in processing order; double-click a slider's name to reset it.
 
 Temporal rendering is on by default. Live preview uses up to three preceding
 frames; export uses the full sequence and applies frame generation. Native
@@ -50,7 +58,7 @@ video output is SDR 8-bit; PNG/TIFF stills retain 16-bit output.
 Experimental [super resolution 2×](docs/super-resolution.md): DLSS SR for video,
 RTX VSR for images. Both support live preview and require separate model files.
 
-![Native macOS app with temporal preview and frame generation](docs/assets/native-app.png)
+![Native macOS app: split comparison of a video frame, filmstrip and inspector](docs/assets/native-app.png)
 
 ## Weights
 

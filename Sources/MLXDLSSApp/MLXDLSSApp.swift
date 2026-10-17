@@ -16,19 +16,19 @@ enum AppLauncher {
 @available(macOS 26.0, *)
 struct MLXDLSSApplication: App {
   @State private var model = AppModel()
+  @State private var canvas = CanvasState()
 
   var body: some Scene {
     Window("MLX DLSS", id: "main") {
-      MainView(model: model)
-        .frame(minWidth: 980, minHeight: 680)
+      MainView(model: model, canvas: canvas)
+        .frame(minWidth: 1140, minHeight: 640)
         .onOpenURL { model.addFiles([$0]) }
         .onAppear { NSApplication.shared.activate() }
     }
-    .defaultSize(width: 1240, height: 820)
-    .commands {
-      CommandGroup(replacing: .newItem) {
-        Button("Import Images or Video…") { model.chooseFiles() }.keyboardShortcut("o")
-      }
+    .defaultSize(width: 1440, height: 900)
+    .commands { AppCommands(model: model, canvas: canvas) }
+    Settings {
+      SettingsView(model: model)
     }
   }
 }
