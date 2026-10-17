@@ -46,6 +46,9 @@ public actor NativeMediaPreview {
   private var dlss: MLXNativeDLSSSuperResolver?
   private var dlssURL: URL?
   private var motionKey: MotionKey?
+  /// Kept across seeks: starting a VideoToolbox session costs more than the
+  /// four flows of a preview window.
+  private var flow: (key: FlowKey, estimator: NativeOpticalFlow)?
   private var motions: [MLXVideoMotion?] = []
   /// The last neural-rendering result and the controls it was rendered with.
   /// Composition-only controls are re-applied to it, and the intensity too when
@@ -79,6 +82,11 @@ public actor NativeMediaPreview {
     let url: URL
     let isVideo: Bool
     let time: Double
+  }
+  private struct FlowKey: Equatable {
+    let width: Int
+    let height: Int
+    let mode: MediaMotion
   }
   private struct MotionKey: Equatable {
     let mode: MediaMotion
@@ -145,7 +153,16 @@ public actor NativeMediaPreview {
       if temporal {
         let key = MotionKey(mode: options.motion, threshold: options.sceneCutThreshold)
         if motionKey != key {
-          let flow = try NativeOpticalFlow(width: selected.rgb.width, height: selected.rgb.height, mode: options.motion)
+          let flowKey = FlowKey(width: selected.rgb.width, height: selected.rgb.height, mode: options.motion)
+          let flow: NativeOpticalFlow
+          if let kept = self.flow, kept.key == flowKey {
+            flow = kept.estimator
+            await flow.reset()
+          } else {
+            self.flow = nil
+            flow = try NativeOpticalFlow(width: flowKey.width, height: flowKey.height, mode: flowKey.mode)
+            self.flow = (flowKey, flow)
+          }
           var prepared: [MLXVideoMotion?] = []
           for (index, frame) in frames.enumerated() {
             try Task.checkCancellation()

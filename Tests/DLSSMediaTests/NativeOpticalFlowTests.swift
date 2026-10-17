@@ -27,6 +27,28 @@ final class NativeOpticalFlowTests: XCTestCase, @unchecked Sendable {
     try await checkTranslation(mode: .vision)
   }
 
+  /// The live preview keeps one estimator across seeks: after a reset the next
+  /// frame starts a new sequence instead of pairing with the old window.
+  func testResetStartsANewSequenceOnTheSameSession() async throws {
+    let width = 512, height = 384
+    let estimator = try NativeOpticalFlow(width: width, height: height, mode: .automatic)
+    let first = try Self.texture(width: width, height: height, dx: 0, dy: 0)
+    let second = try Self.texture(width: width, height: height, dx: 8, dy: -4)
+    _ = try await estimator.prepare(first, index: 0, sceneCutThreshold: 0.3)
+    _ = try await estimator.prepare(second, index: 1, sceneCutThreshold: 0.3)
+    await estimator.reset()
+    let restarted = try await estimator.prepare(first, index: 40, sceneCutThreshold: 0.3)
+    XCTAssertNil(restarted)
+    let optionalMotion = try await estimator.prepare(second, index: 41, sceneCutThreshold: 0.3)
+    let motion = try XCTUnwrap(optionalMotion)
+    let vectors = motion.vectors.asArray(Float.self)
+    var horizontal: [Float] = []
+    for y in height / 4..<3 * height / 4 { for x in width / 4..<3 * width / 4 {
+      horizontal.append(vectors[(y * width + x) * 2] * Float(width))
+    } }
+    XCTAssertEqual(horizontal.sorted()[horizontal.count / 2], -8, accuracy: 0.7)
+  }
+
   private func checkTranslation(mode: MediaMotion) async throws {
     let width = 512, height = 384
     let estimator = try NativeOpticalFlow(width: width, height: height, mode: mode)

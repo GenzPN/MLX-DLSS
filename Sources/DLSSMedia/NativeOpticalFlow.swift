@@ -50,6 +50,13 @@ public actor NativeOpticalFlow {
     backend = selected.rawValue
   }
 
+  /// Starts a new sequence on the same session: the next frame has no
+  /// predecessor and its successor goes in as random access, as on a new estimator.
+  public func reset() {
+    previous = nil
+    randomAccess = true
+  }
+
   public func prepare(_ frame: MLXVideoFrame, index: Int, sceneCutThreshold: Float) async throws -> MLXVideoMotion? {
     guard !inFlight else { throw MLXMediaError("Optical flow frames must be submitted sequentially") }
     guard frame.width == width, frame.height == height else { throw MLXMediaError("Optical flow frame size changed") }

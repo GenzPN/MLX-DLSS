@@ -161,7 +161,9 @@ returns original/processed `CGImage`s, the actual selected timestamp and timing.
 Retain one preview actor to reuse weights and decoded frames. Submit requests
 sequentially, coalesce changes and discard superseded responses, as the native
 app does. Video preview uses up to three preceding frames and a fresh temporal
-history per request; FG is reserved for export. Preview and export should share
+history per request; FG is reserved for export. The actor keeps its
+VideoToolbox optical-flow session between requests of the same size and motion
+mode, so a seek does not pay for a new session. Preview and export should share
 one scheduling lane so they do not compete for the GPU.
 
 `mlxdlss preview-stream` exposes that actor to the web UI on macOS 26+. Each
@@ -371,6 +373,24 @@ Tried without a gain:
 
 The four GEMMs, about 1.5 ms of each block at 640 tokens, remain the main
 cost.
+
+### Export and preview timeline (2026-10-17, later)
+
+A Metal System Trace of a 1080p small-network export shows the GPU busy for
+65–70 ms of each frame, with about 0.02 ms idle between command buffers.
+Scheduling has no gaps left to recover inside a frame.
+
+VideoToolbox optical flow takes 22–37 ms per frame and bounds the export of
+SD clips; the pipeline adds 4–6 ms around it. Each flow takes the previous
+one as a hint, so running flows in parallel would change the output.
+
+Live preview keeps its VideoToolbox session across requests of the same frame
+size and motion mode, and `NativeOpticalFlow.reset()` starts each new window
+as a fresh session would. Starting a session costs about 0.4 s. A seek with
+temporal history fell from 0.75–1.1 s to 0.16–0.17 s on a 654×480 clip and
+takes 0.54–0.58 s at 1216×1664. The reused session returns the same preview
+as a new one. The first preview after launch takes 1.3–1.9 s: 0.34 s to load
+the renderer, 0.43 s for the first network frames and 0.4 s for the session.
 
 ### Earlier measurements
 
