@@ -26,10 +26,19 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Verify DLSS 5 small support from source
+        shell: bash
+        run: |
+          grep -Fq '"NeuralRendering-Small.dlssmodel", "NeuralRendering.dlssmodel"' \
+            Sources/MLXDLSSApp/AppModel.swift
+          grep -Fq 'static let small = NeuralRenderingTopology(depths: [2, 2, 2, 2, 2])' \
+            Sources/DLSSMLX/NeuralRenderingTopology.swift
+
       - name: Build native app
         run: scripts/build-native-app.sh
 
       - name: Package build output
+        shell: bash
         run: |
           mkdir -p artifacts
           ditto -c -k --sequesterRsrc --keepParent \
@@ -37,6 +46,27 @@ jobs:
             "artifacts/MLX-DLSS-macos.zip"
 
           cp ".build/release/mlxdlss" artifacts/ 2>/dev/null || true
+          cp ".build/release/mlx.metallib" artifacts/ 2>/dev/null || true
+
+      - name: Verify packaged runtime and legal boundaries
+        shell: bash
+        run: |
+          if otool -L '.build/MLX DLSS.app/Contents/MacOS/MLXDLSSApp' '.build/release/mlxdlss' \
+            | grep -Ei '(python|ffmpeg|avcodec|avformat|avutil)'; then
+            echo "Artifact must not require Python/FFmpeg runtime dependencies" >&2
+            exit 1
+          fi
+          if find artifacts -type f \( -iname '*.dll' -o -iname '*.so' -o -iname '*.dylib' -o -iname '*.dlssmodel' -o -iname '*.safetensors' \) | grep -q .; then
+            echo "Artifact must not redistribute NVIDIA libraries or extracted weights" >&2
+            exit 1
+          fi
+          {
+            echo "### macOS artifact notes"
+            echo "- Includes native app (\`MLX DLSS.app\`), \`mlxdlss\` CLI, and \`mlx.metallib\`."
+            echo "- No Python or FFmpeg runtime dependencies are bundled."
+            echo "- NVIDIA binaries/weights are not bundled."
+            echo "- DLSS 5 Small support is compiled from source; users must provide their own legally extracted weights (for example \`NeuralRendering-Small.dlssmodel\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build files
         uses: actions/upload-artifact@v4
