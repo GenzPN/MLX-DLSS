@@ -20,23 +20,45 @@ jobs:
       - name: Select Xcode
         shell: bash
         run: |
-          xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort | tail -1)"
-          test -n "$xcode_app"
+          xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' -print | sort -V | tail -1)"
+          if [[ -z "$xcode_app" ]]; then
+            echo "No Xcode installation found under /Applications" >&2
+            exit 1
+          fi
           sudo xcode-select --switch "$xcode_app/Contents/Developer"
+          echo "Using $xcode_app"
           xcodebuild -version
           swift --version
+          test "$(uname -m)" = "arm64"
 
       - name: Build native app
-        run: scripts/build-native-app.sh
+        shell: bash
+        run: |
+          scripts/build-native-app.sh
+          app_binary=".build/MLX DLSS.app/Contents/MacOS/MLXDLSSApp"
+          test -f "$app_binary"
+          lipo -archs "$app_binary" | grep -qw arm64
 
       - name: Package build output
+        shell: bash
         run: |
-          mkdir -p artifacts
-          ditto -c -k --sequesterRsrc --keepParent \
-            ".build/MLX DLSS.app" \
-            "artifacts/MLX-DLSS-macos.zip"
+          artifacts_dir="$GITHUB_WORKSPACE/artifacts"
+          app_path="$GITHUB_WORKSPACE/.build/MLX DLSS.app"
+          zip_path="$artifacts_dir/MLX-DLSS-macos.zip"
+          cli_path="$GITHUB_WORKSPACE/.build/release/mlxdlss"
 
-          cp ".build/release/mlxdlss" artifacts/ 2>/dev/null || true
+          mkdir -p "$artifacts_dir"
+          test -d "$app_path"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app_path" \
+            "$zip_path"
+          test -f "$zip_path"
+          shasum -a 256 "$zip_path" > "$artifacts_dir/MLX-DLSS-macos.zip.sha256"
+
+          if [[ -f "$cli_path" ]]; then
+            cp "$cli_path" "$artifacts_dir/mlxdlss"
+            shasum -a 256 "$artifacts_dir/mlxdlss" > "$artifacts_dir/mlxdlss.sha256"
+          fi
 
       - name: Upload build files
         uses: actions/upload-artifact@v4
