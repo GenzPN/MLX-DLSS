@@ -1,0 +1,46 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort | tail -1)"
+          test -n "$xcode_app"
+          sudo xcode-select --switch "$xcode_app/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: Build native app
+        run: scripts/build-native-app.sh
+
+      - name: Package build output
+        run: |
+          mkdir -p artifacts
+          ditto -c -k --sequesterRsrc --keepParent \
+            ".build/MLX DLSS.app" \
+            "artifacts/MLX-DLSS-macos.zip"
+
+          cp ".build/release/mlxdlss" artifacts/ 2>/dev/null || true
+
+      - name: Upload build files
+        uses: actions/upload-artifact@v4
+        with:
+          name: MLX-DLSS-macos
+          path: artifacts/
+          if-no-files-found: error
