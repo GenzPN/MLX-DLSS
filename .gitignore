@@ -13,3 +13,10 @@ python/build/
 
 # extracted proprietary weights (mlxdlss-weights output), never committed
 weights/
+!weights/
+weights/*
+!weights/safetensors/
+weights/safetensors/*
+!weights/safetensors/dlss5/
+weights/safetensors/dlss5/*
+!weights/safetensors/dlss5/.gitkeep

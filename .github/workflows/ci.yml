@@ -26,6 +26,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Ensure DLSS 5 SafeTensors directory
+        shell: bash
+        run: |
+          mkdir -p weights/safetensors/dlss5
+          test -d weights/safetensors/dlss5
+
       - name: Select Swift 6.2 toolchain
         shell: bash
         run: |
@@ -51,6 +57,41 @@ jobs:
             echo 'The native app must not link Python' >&2
             exit 1
           fi
+
+      - name: Package build output
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          artifacts_dir="$GITHUB_WORKSPACE/artifacts"
+          app_path="$GITHUB_WORKSPACE/.build/MLX DLSS.app"
+          zip_path="$artifacts_dir/MLX-DLSS-macos.zip"
+          cli_path="$GITHUB_WORKSPACE/.build/release/mlxdlss"
+          safetensors_dir="$GITHUB_WORKSPACE/weights/safetensors/dlss5"
+
+          mkdir -p "$artifacts_dir"
+          test -d "$app_path"
+          test -d "$safetensors_dir"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app_path" \
+            "$zip_path"
+          test -f "$zip_path"
+          shasum -a 256 "$zip_path" > "$artifacts_dir/MLX-DLSS-macos.zip.sha256"
+
+          mkdir -p "$artifacts_dir/weights/safetensors"
+          cp -a "$safetensors_dir" "$artifacts_dir/weights/safetensors/"
+
+          if [[ -f "$cli_path" ]]; then
+            cp "$cli_path" "$artifacts_dir/mlxdlss"
+            shasum -a 256 "$artifacts_dir/mlxdlss" > "$artifacts_dir/mlxdlss.sha256"
+          fi
+
+      - name: Upload build files
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MLX-DLSS-macos
+          path: artifacts/
+          if-no-files-found: error
 
       - name: Select Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -84,6 +125,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Ensure DLSS 5 SafeTensors directory
+        shell: bash
+        run: |
+          mkdir -p weights/safetensors/dlss5
+          test -d weights/safetensors/dlss5
 
       - name: Select Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
